@@ -670,9 +670,10 @@ jobs:
           sudo rm -rf /usr/local/lib/android &
           sudo rm -rf /opt/ghc &
           sudo rm -rf /opt/hostedtoolcache/CodeQL &
-          make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="clang" LD="ld.lld" OBJCOPY="llvm-objcopy" O=out gki_defconfig &&
-          export CC="$(pwd)/cc-wrapper" && export LD="$(pwd)/ld-wrapper" &&
-          make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="$(pwd)/cc-wrapper" LD="$(pwd)/ld-wrapper" OBJCOPY="llvm-objcopy" O=out Image
+          set -o pipefail
+          make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="clang" LD="ld.lld" OBJCOPY="llvm-objcopy" O=out gki_defconfig 2>&1 | tee ../build-defconfig.log
+          export CC="$(pwd)/cc-wrapper" && export LD="$(pwd)/ld-wrapper"
+          make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="$(pwd)/cc-wrapper" LD="$(pwd)/ld-wrapper" OBJCOPY="llvm-objcopy" O=out Image 2>&1 | tee ../build-image.log
           
           # 编译后时间劫持二次校验
           echo "--- 编译后环境时间: $(LD_PRELOAD=$PRELOAD_LIBS date) ---"
@@ -684,12 +685,24 @@ jobs:
             cd ..
             cp ./common/out/vmlinux.symvers ./vmlinux.symvers
             cp ./common/out/.config ./config
-            zip -r9 debug.zip ccache.log config vmlinux.symvers
+            zip -r9 debug.zip ccache.log config vmlinux.symvers build-defconfig.log build-image.log
           fi
           echo "ccache状态："
           ccache -s
           echo "编译后空间:"
           df -h
+
+      - name: 失败日志摘要
+        if: failure()
+        working-directory: kernel_workspace
+        run: |
+          for f in build-defconfig.log build-image.log; do
+            [ -f "$f" ] || continue
+            echo "===== $f 错误摘要 ====="
+            grep -nE "Error [0-9]|\*\*\*|error:|Please wait|You should integrate|undefined reference|No rule to make target|Kconfig" "$f" | tail -n 60
+            echo "----- 该文件末尾 40 行 -----"
+            tail -n 40 "$f"
+          done
 
       - name: 保存新的 ccache 缓存
         if: inputs.ccache_update || steps.ccache-restore.outputs.cache-hit != 'true'
