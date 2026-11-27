@@ -109,8 +109,8 @@ jobs:
   build:
     runs-on: ubuntu-24.04
     outputs:
-      ksuver: ${ steps.ksu_version.outputs.ksuver }
-      ak3name: ${ steps.create_zip.outputs.ak3name }
+      ksuver: ${{ steps.ksu_version.outputs.ksuver }}
+      ak3name: ${{ steps.create_zip.outputs.ak3name }}
     permissions:
       actions: write
       contents: read
@@ -239,15 +239,15 @@ jobs:
 
       - name: 配置ccache目录
         run: |
-          echo "CCACHE_DIR=$HOME/.ccache_${ env.KERNEL_VERSION }.${ env.SUB_VERSION }" >> $GITHUB_ENV
+          echo "CCACHE_DIR=$HOME/.ccache_${{ env.KERNEL_VERSION }}.${{ env.SUB_VERSION }}" >> $GITHUB_ENV
           echo "CCACHE_MAXSIZE=3G" >> $GITHUB_ENV
           echo "当前磁盘空间："
           df -h
-          echo "当前构建内核版本：${ env.KERNEL_VERSION }.${ env.SUB_VERSION }"
+          echo "当前构建内核版本：${{ env.KERNEL_VERSION }}.${{ env.SUB_VERSION }}"
           if [[ "${{ github.event.inputs.droidspaces_enable }}" != "false" ]]; then
-            CCACHE_REAL_KEY=${ env.CCACHE_KEY }-Droidspaces
+            CCACHE_REAL_KEY=${{ env.CCACHE_KEY }}-Droidspaces
           else
-            CCACHE_REAL_KEY=${ env.CCACHE_KEY }-none
+            CCACHE_REAL_KEY=${{ env.CCACHE_KEY }}-none
           fi
           echo "CCACHE_REAL_KEY=$CCACHE_REAL_KEY" >> $GITHUB_ENV
 
