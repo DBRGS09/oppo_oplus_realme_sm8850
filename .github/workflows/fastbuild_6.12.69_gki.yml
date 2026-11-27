@@ -26,6 +26,11 @@ on:
           - 'ksunext'
           - 'ksu'
           - 'none'
+      ksu_ref:
+        description: '对齐的管理器版本号(纯数字,如 32680 / 33355 / 35019; 留空=自动读取官方管理器最新APK里的版本号; bakasu留空=上游最新)'
+        required: false
+        type: string
+        default: ''
       susfs_enable:
         description: '是否开启susfs(增强隐藏环境挂载; SukiSU Nova 开启时自动使用带内置SUSFS的 clean_code 分支)'
         required: true
@@ -324,6 +329,15 @@ jobs:
         id: ksu_version
         run: |
           cd kernel_workspace
+          GH_API="https://api.github.com"
+          NOVA_API="${{ env.NOVA_REPO_HOST }}/api/v1/repos/${{ env.NOVA_REPO_OWNER }}/${{ env.NOVA_REPO_NAME }}"
+          KSU_TARGET="$(echo '${{ github.event.inputs.ksu_ref }}' | tr -d '[:space:]')"
+          KSU_TARGET="${KSU_TARGET#v}"
+          case "$KSU_TARGET" in
+            *[!0-9]*) echo "::warning title=ksu-ref::ksu_ref 只接受纯数字版本号，已忽略: $KSU_TARGET"; KSU_TARGET="" ;;
+          esac
+          echo "手动指定的目标版本号: ${KSU_TARGET:-（空，按分支默认策略）}"
+          
           fetch_setup() {
             local url="$1" out="$2" i
             for i in 1 2 3 4 5; do
@@ -336,6 +350,63 @@ jobs:
             done
             return 1
           }
+          
+          # 从 GitHub latest release 的 APK 文件名里读出 5~6 位版本号
+          gh_apk_version() {
+            curl -sL --retry 3 --connect-timeout 20 "$GH_API/repos/$1/releases/latest" \
+              | grep -o '"name":"[^"]*\.apk"' \
+              | sed 's/.*"name":"//; s/"$//' \
+              | grep -oE '[0-9]{5,6}' | sort -n | tail -n 1
+          }
+          
+          # 版本号 → 发布 tag（在 releases 里找 APK 名字带该版本号的那个 tag）
+          gh_tag_by_version() {
+            curl -sL --retry 3 --connect-timeout 20 "$GH_API/repos/$1/releases?per_page=100" \
+              | grep -oE '"tag_name":"[^"]*"|"name":"[^"]*\.apk"' \
+              | awk -v v="$2" '
+                  /"tag_name"/ { tag=$0; sub(/.*"tag_name":"/,"",tag); sub(/".*/,"",tag) }
+                  /\.apk"/     { if (index($0, "_" v "-") > 0) { print tag; exit } }'
+          }
+          
+          # 版本号 → 提交 sha（按「基数 + 提交数」反查第几个提交）
+          gh_commit_by_version() {
+            local repo="$1" branch="$2" ver="$3" base="$4" total target page sha
+            total=$(curl -sI --retry 3 --connect-timeout 20 "$GH_API/repos/$repo/commits?sha=$branch&per_page=1" \
+                    | tr -d '\r' | sed -n 's/.*page=\([0-9]*\)>; rel="last".*/\1/p')
+            [ -n "$total" ] || return 1
+            target=$(( ver - base ))
+            [ "$target" -ge 1 ] || return 1
+            page=$(( total - target + 1 ))
+            [ "$page" -ge 1 ] || page=1
+            sha=$(curl -s --retry 3 --connect-timeout 20 "$GH_API/repos/$repo/commits?sha=$branch&per_page=1&page=$page" \
+                  | grep -m1 -o '"sha":"[0-9a-f]\{40\}"' | head -n1 | sed 's/.*"sha":"//; s/"//')
+            [ -n "$sha" ] || return 1
+            echo "$sha"
+          }
+          
+          # 从 CNB 的 apks 目录里读出 SukiSU Nova 管理器版本号
+          nova_apk_version() {
+            curl -sL --retry 3 --connect-timeout 20 "https://cnb.cool/sukisu-nova/Release/-/tree/manager-ci/apks" \
+              | grep -oE 'SukiSU_Nova[^"'"'"'<>\\]*\.apk' \
+              | grep -oE '_[0-9]{5,6}-arm64' | grep -oE '[0-9]{5,6}' | sort -n | tail -n 1
+          }
+          
+          # 版本号 → Nova 提交 sha（Nova 的号 = 30000 + 提交数 + 996）
+          nova_commit_by_version() {
+            local branch="$1" ver="$2" total target page sha
+            total=$(curl -s -D - -o /dev/null --retry 3 --connect-timeout 20 "$NOVA_API/commits?sha=$branch&limit=1" \
+                    | tr -d '\r' | sed -n 's/^[Xx]-[Tt]otal-[Cc]ount:[[:space:]]*\([0-9]*\).*/\1/p')
+            [ -n "$total" ] || return 1
+            target=$(( ver - 30996 ))
+            [ "$target" -ge 1 ] || return 1
+            page=$(( total - target + 1 ))
+            [ "$page" -ge 1 ] || page=1
+            sha=$(curl -s --retry 3 --connect-timeout 20 "$NOVA_API/commits?sha=$branch&limit=1&page=$page" \
+                  | grep -m1 -o '"sha":"[0-9a-f]\{40\}"' | head -n1 | sed 's/.*"sha":"//; s/"//')
+            [ -n "$sha" ] || return 1
+            echo "$sha"
+          }
+          
           if [[ ${{ github.event.inputs.ksu_type }} == "sukisu" || ${{ github.event.inputs.ksu_type }} == "bakasu" ]]; then
             echo "正在配置BakaSU（由于SukiSU长期未维护无法正常编译，且BakaSU兼容sukisu管理器，故SukiSU源码仓库已重定向为bakasu）..."
             fetch_setup "https://raw.githubusercontent.com/Baka-SU/BakaSU/refs/heads/main/kernel/setup.sh" /tmp/ksu_setup.sh || { echo "::error title=ksu-setup::BakaSU setup.sh 下载失败"; exit 1; }
@@ -344,9 +415,25 @@ jobs:
             [ -d ./KernelSU ] || { echo "::error title=ksu-setup::BakaSU 源码目录不存在"; exit 1; }
             echo 'CONFIG_KSU_FULL_NAME_FORMAT="%TAG_NAME%-%COMMIT_SHA%@桂烁"' >> ./common/arch/arm64/configs/gki_defconfig
             cd ./KernelSU
+            if [ -n "$KSU_TARGET" ]; then
+              BK_SHA=$(gh_commit_by_version "Baka-SU/BakaSU" "main" "$KSU_TARGET" 30700 || true)
+              if [ -n "$BK_SHA" ]; then
+                git checkout "$BK_SHA" && echo "已把 BakaSU 切到版本 $KSU_TARGET（$BK_SHA）"
+              else
+                echo "::warning title=ksu-ref::没能把版本号 $KSU_TARGET 换算成 BakaSU 提交，保持上游最新"
+                KSU_TARGET=""
+              fi
+            else
+              echo "BakaSU 未指定版本号，使用上游最新（与之前一致）"
+            fi
             echo "KSU 实际提交: $(git rev-parse HEAD)"
             echo "::notice title=ksu-head::$(git rev-parse HEAD)"
-            KSU_VERSION=$(expr $(git rev-list --count main) + 30700 2>/dev/null || echo 114514)
+            if [ -n "$KSU_TARGET" ]; then
+              KSU_VERSION=$KSU_TARGET
+            else
+              KSU_VERSION=$(expr $(git rev-list --count main) + 30700 2>/dev/null || echo 114514)
+            fi
+            echo "KSU 版本号: $KSU_VERSION"
             echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
             echo "ksuver=$KSU_VERSION" >> $GITHUB_OUTPUT
           elif [[ ${{ github.event.inputs.ksu_type }} == "sukisunova" ]]; then
@@ -360,23 +447,43 @@ jobs:
             fi
             echo "SukiSU Nova 目标分支: $NOVA_BRANCH（susfs_enable=${{ github.event.inputs.susfs_enable }}）"
             echo "仓库地址: $NOVA_URL"
-            echo "应急 tarball: $NOVA_ARCHIVE/$NOVA_BRANCH.tar.gz"
+            NOVA_TARGET="$KSU_TARGET"
+            if [ -z "$NOVA_TARGET" ]; then
+              NOVA_TARGET=$(nova_apk_version || true)
+              echo "自动读取 Nova 管理器版本号: ${NOVA_TARGET:-未取到}"
+            fi
+            NOVA_SHA=""
+            if [ -n "$NOVA_TARGET" ]; then
+              NOVA_SHA=$(nova_commit_by_version "$NOVA_BRANCH" "$NOVA_TARGET" || true)
+              if [ -n "$NOVA_SHA" ]; then
+                echo "版本 $NOVA_TARGET 对应 Nova 提交: $NOVA_SHA"
+              else
+                echo "::warning title=ksu-ref::没能把版本号 $NOVA_TARGET 换算成 Nova 提交，改用分支最新"
+                NOVA_TARGET=""
+              fi
+            fi
             export GIT_TERMINAL_PROMPT=0
             NOVA_OK=0
             NOVA_MODE=""
-            # 三级降级：浅克隆 → 完整克隆 → 直接下 tarball（纯 HTTP，不碰 git 协议）
-            for mode in shallow full tarball; do
+            # 指定了版本号时必须完整克隆（浅克隆拿不到老提交）；否则优先浅克隆，最后 tarball 兜底
+            if [ -n "$NOVA_SHA" ]; then
+              NOVA_MODES="full tarball"
+            else
+              NOVA_MODES="shallow full tarball"
+            fi
+            for mode in $NOVA_MODES; do
               for i in 1 2; do
                 rm -rf ./KernelSU
                 echo "---- Nova 获取方式: $mode（第 $i 次尝试）----"
                 if [[ "$mode" == "tarball" ]]; then
                   mkdir -p ./KernelSU
+                  TAR_REF="${NOVA_SHA:-$NOVA_BRANCH}"
                   if timeout 300 curl -fL --retry 2 --retry-delay 3 --connect-timeout 20 --max-time 300 \
-                       -o /tmp/nova.tar.gz "$NOVA_ARCHIVE/$NOVA_BRANCH.tar.gz" \
+                       -o /tmp/nova.tar.gz "$NOVA_ARCHIVE/$TAR_REF.tar.gz" \
                      && tar -xzf /tmp/nova.tar.gz -C ./KernelSU --strip-components=1; then
                     NOVA_OK=1
-                    NOVA_MODE="tarball"
-                    echo "tarball 解压完成（无 .git，版本号走 API 兜底）"
+                    NOVA_MODE="tarball($TAR_REF)"
+                    echo "tarball 解压完成（无 .git，版本号走指定值/API 兜底）"
                     break 2
                   fi
                 elif [[ "$mode" == "shallow" ]]; then
@@ -400,10 +507,12 @@ jobs:
             [ "$NOVA_OK" = "1" ] || { echo "::error title=nova-clone::SukiSU Nova 三种获取方式全部失败（网络到 ${{ env.NOVA_REPO_HOST }} 不通）"; exit 1; }
             echo "Nova 获取方式最终结果: $NOVA_MODE"
             [ -d ./KernelSU/kernel ] || { echo "::error title=nova-tree::SukiSU Nova 目录结构异常（没有 kernel/ 目录）"; exit 1; }
+            if [ -n "$NOVA_SHA" ] && [ -d ./KernelSU/.git ]; then
+              git -C KernelSU checkout "$NOVA_SHA" && echo "已把 Nova 切到版本 $NOVA_TARGET（$NOVA_SHA）" || echo "::warning title=ksu-ref::Nova 本地切到 $NOVA_SHA 失败，继续用当前内容"
+            fi
             # 关键修复：Nova 的 Kbuild 给 core/init.o 加了 -g0（去调试信息），
             # 但开启 SUSFS 后 init.o 会导出符号，ACK 的 gendwarfksyms 需要 DWARF，
             # 否则报 "dwarf_get_units failed: no debugging information?"。
-            # 这里把 Kbuild 里所有 -g0 换成 -g（只影响 vmlinux 调试段，不进最终 Image）
             if [ -f ./KernelSU/kernel/Kbuild ]; then
               sed -i 's/\(^\|[[:space:]]\)-g0\b/-g/g' ./KernelSU/kernel/Kbuild
               echo "---- Nova Kbuild -g0 处理结果 ----"
@@ -423,33 +532,71 @@ jobs:
             echo "Nova 当前提交: $(git -C KernelSU rev-parse HEAD 2>/dev/null || echo '无 .git（tarball 模式）')"
             echo "Nova 当前分支: $(git -C KernelSU rev-parse --abbrev-ref HEAD 2>/dev/null || echo "$NOVA_BRANCH（tarball 模式）")"
             echo "::notice title=ksu-head::$(git -C KernelSU rev-parse HEAD 2>/dev/null || echo "tarball-$NOVA_BRANCH")"
-            N=$(curl -s -D - -o /dev/null --retry 3 --connect-timeout 20 \
-                 "${{ env.NOVA_REPO_HOST }}/api/v1/repos/${{ env.NOVA_REPO_OWNER }}/${{ env.NOVA_REPO_NAME }}/commits?sha=${NOVA_BRANCH}&limit=1" \
-                 | tr -d '\r' | sed -n 's/^[Xx]-[Tt]otal-[Cc]ount:[[:space:]]*\([0-9]*\).*/\1/p')
-            [ -n "$N" ] || N=$(git -C KernelSU rev-list --count HEAD 2>/dev/null || echo 1)
-            echo "Nova 提交计数: $N"
-            KSU_VERSION=$((30000 + N + 996))
+            if [ -n "$NOVA_TARGET" ]; then
+              KSU_VERSION=$NOVA_TARGET
+            else
+              N=$(curl -s -D - -o /dev/null --retry 3 --connect-timeout 20 \
+                   "$NOVA_API/commits?sha=${NOVA_BRANCH}&limit=1" \
+                   | tr -d '\r' | sed -n 's/^[Xx]-[Tt]otal-[Cc]ount:[[:space:]]*\([0-9]*\).*/\1/p')
+              [ -n "$N" ] || N=$(git -C KernelSU rev-list --count HEAD 2>/dev/null || echo 1)
+              echo "Nova 提交计数: $N"
+              KSU_VERSION=$((30000 + N + 996))
+            fi
+            echo "KSU 版本号: $KSU_VERSION"
             echo "NOVA_BRANCH=$NOVA_BRANCH" >> $GITHUB_ENV
             echo "KSU_BUILD_REF=桂烁" >> $GITHUB_ENV
             echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
             echo "ksuver=$KSU_VERSION" >> $GITHUB_OUTPUT
           elif [[ ${{ github.event.inputs.ksu_type }} == "ksunext" ]]; then
             echo "正在配置KernelSU Next..."
+            KSUN_TARGET="$KSU_TARGET"
+            if [ -z "$KSUN_TARGET" ]; then
+              KSUN_TARGET=$(gh_apk_version "KernelSU-Next/KernelSU-Next" || true)
+              echo "自动读取 KernelSU-Next 管理器版本号: ${KSUN_TARGET:-未取到}"
+            fi
             fetch_setup "https://raw.githubusercontent.com/pershoot/KernelSU-Next/refs/heads/dev-susfs/kernel/setup.sh" /tmp/ksun_setup.sh || { echo "::error title=ksun-setup::KernelSU-Next setup.sh 下载失败"; exit 1; }
             bash /tmp/ksun_setup.sh dev-susfs || { echo "::error title=ksun-setup::KernelSU-Next setup.sh 执行失败"; exit 1; }
             rm -f /tmp/ksun_setup.sh
             [ -d KernelSU-Next ] || { echo "::error title=ksun-setup::KernelSU-Next 源码目录不存在"; exit 1; }
             cd KernelSU-Next
+            if [ -n "$KSUN_TARGET" ]; then
+              KSUN_TAG=$(gh_tag_by_version "KernelSU-Next/KernelSU-Next" "$KSUN_TARGET" || true)
+              KSUN_HIT=0
+              if [ -n "$KSUN_TAG" ]; then
+                if git checkout "$KSUN_TAG"; then
+                  echo "已把 KernelSU-Next 切到 tag $KSUN_TAG（版本 $KSUN_TARGET）"
+                  KSUN_HIT=1
+                fi
+              fi
+              if [ "$KSUN_HIT" = "0" ]; then
+                KSUN_SHA=$(gh_commit_by_version "pershoot/KernelSU-Next" "dev-susfs" "$KSUN_TARGET" 30000 || true)
+                if [ -n "$KSUN_SHA" ]; then
+                  git checkout "$KSUN_SHA" && echo "已把 KernelSU-Next 切到提交 $KSUN_SHA（版本 $KSUN_TARGET）" && KSUN_HIT=1
+                fi
+              fi
+              if [ "$KSUN_HIT" = "0" ]; then
+                echo "::warning title=ksu-ref::没能把版本号 $KSUN_TARGET 换算成 KernelSU-Next 的 tag/提交，改用分支最新"
+                KSUN_TARGET=""
+              fi
+            fi
+            echo "KSUNext 实际提交: $(git rev-parse HEAD)"
+            echo "::notice title=ksu-head::$(git rev-parse HEAD)"
             rm -rf .git
-            N=$(curl -sI --retry 3 --connect-timeout 20 "https://api.github.com/repos/pershoot/KernelSU-Next/commits?sha=dev&per_page=1" | grep -i "link:" | sed -n 's/.*page=\([0-9]*\)>; rel="last".*/\1/p')
-            N=${N:-1}
-            KSU_VERSION=$((N + 30000))
+            if [ -n "$KSUN_TARGET" ]; then
+              KSU_VERSION=$KSUN_TARGET
+            else
+              N=$(curl -sI --retry 3 --connect-timeout 20 "$GH_API/repos/pershoot/KernelSU-Next/commits?sha=dev&per_page=1" | grep -i "link:" | sed -n 's/.*page=\([0-9]*\)>; rel="last".*/\1/p')
+              N=${N:-1}
+              KSU_VERSION=$((N + 30000))
+            fi
+            echo "KSU 版本号: $KSU_VERSION"
             echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
             echo "ksuver=$KSU_VERSION" >> $GITHUB_OUTPUT
             sed -i "s/KSU_VERSION_FALLBACK := 1/KSU_VERSION_FALLBACK := $KSU_VERSION/g" kernel/Kbuild
-            KSU_GIT_TAG=$(curl -sL --retry 3 --connect-timeout 20 "https://api.github.com/repos/KernelSU-Next/KernelSU-Next/tags" | grep -o '"name": *"[^"]*"' | head -n 1 | sed 's/"name": "//;s/"//')
+            KSU_GIT_TAG=$(gh_tag_by_version "KernelSU-Next/KernelSU-Next" "$KSU_VERSION" || true)
             KSU_GIT_TAG=${KSU_GIT_TAG:-v0.0.1}
             sed -i "s/KSU_VERSION_TAG_FALLBACK := v0.0.1/KSU_VERSION_TAG_FALLBACK := $KSU_GIT_TAG/g" kernel/Kbuild
+            echo "写入 Kbuild 的版本兜底: $KSU_VERSION / tag $KSU_GIT_TAG"
             cd ../common/drivers/kernelsu
             if wget -q -O apk_sign.patch "https://raw.githubusercontent.com/$GITHUB_REPOSITORY/$GITHUB_REF_NAME/other_patch/apk_sign.patch" && [ -s apk_sign.patch ]; then
               patch -p2 -N -F 3 < apk_sign.patch || true
@@ -458,16 +605,46 @@ jobs:
             fi
           elif [[ ${{ github.event.inputs.ksu_type }} == "ksu" ]]; then
             echo "正在配置原版 KernelSU (tiann/KernelSU)..."
+            KSU_GH_TARGET="$KSU_TARGET"
+            if [ -z "$KSU_GH_TARGET" ]; then
+              KSU_GH_TARGET=$(gh_apk_version "tiann/KernelSU" || true)
+              echo "自动读取 tiann/KernelSU 管理器版本号: ${KSU_GH_TARGET:-未取到}"
+            fi
             fetch_setup "https://raw.githubusercontent.com/tiann/KernelSU/refs/heads/main/kernel/setup.sh" /tmp/ksu_orig_setup.sh || { echo "::error title=ksu-setup::KernelSU setup.sh 下载失败"; exit 1; }
             bash /tmp/ksu_orig_setup.sh main || { echo "::error title=ksu-setup::KernelSU setup.sh 执行失败"; exit 1; }
             rm -f /tmp/ksu_orig_setup.sh
             [ -d ./KernelSU ] || { echo "::error title=ksu-setup::KernelSU 源码目录不存在"; exit 1; }
-            echo "KSU 实际提交: $(git -C ./KernelSU rev-parse HEAD)"
-            echo "::notice title=ksu-head::$(git -C ./KernelSU rev-parse HEAD)"
             cd ./KernelSU
-            N=$(curl -sI --retry 3 --connect-timeout 20 "https://api.github.com/repos/tiann/KernelSU/commits?sha=main&per_page=1" | grep -i "link:" | sed -n 's/.*page=\([0-9]*\)>; rel="last".*/\1/p')
-            N=${N:-1}
-            KSU_VERSION=$((N + 30000))
+            if [ -n "$KSU_GH_TARGET" ]; then
+              KSU_TAG=$(gh_tag_by_version "tiann/KernelSU" "$KSU_GH_TARGET" || true)
+              KSU_HIT=0
+              if [ -n "$KSU_TAG" ]; then
+                if git checkout "$KSU_TAG"; then
+                  echo "已把 KernelSU 切到 tag $KSU_TAG（版本 $KSU_GH_TARGET）"
+                  KSU_HIT=1
+                fi
+              fi
+              if [ "$KSU_HIT" = "0" ]; then
+                KSU_SHA=$(gh_commit_by_version "tiann/KernelSU" "main" "$KSU_GH_TARGET" 30000 || true)
+                if [ -n "$KSU_SHA" ]; then
+                  git checkout "$KSU_SHA" && echo "已把 KernelSU 切到提交 $KSU_SHA（版本 $KSU_GH_TARGET）" && KSU_HIT=1
+                fi
+              fi
+              if [ "$KSU_HIT" = "0" ]; then
+                echo "::warning title=ksu-ref::没能把版本号 $KSU_GH_TARGET 换算成 KernelSU 的 tag/提交，改用分支最新"
+                KSU_GH_TARGET=""
+              fi
+            fi
+            echo "KSU 实际提交: $(git rev-parse HEAD)"
+            echo "::notice title=ksu-head::$(git rev-parse HEAD)"
+            if [ -n "$KSU_GH_TARGET" ]; then
+              KSU_VERSION=$KSU_GH_TARGET
+            else
+              N=$(curl -sI --retry 3 --connect-timeout 20 "$GH_API/repos/tiann/KernelSU/commits?sha=main&per_page=1" | grep -i "link:" | sed -n 's/.*page=\([0-9]*\)>; rel="last".*/\1/p')
+              N=${N:-1}
+              KSU_VERSION=$((N + 30000))
+            fi
+            echo "KSU 版本号: $KSU_VERSION"
             echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
             echo "ksuver=$KSU_VERSION" >> $GITHUB_OUTPUT
             sed -i "s/KSU_VERSION=16/KSU_VERSION=${KSU_VERSION}/" kernel/Kbuild || true
@@ -1306,6 +1483,7 @@ jobs:
           - 编译时间: ${{ env.TIME_FORM }}
           - 机型：骁龙8E Gen5 通用 ${{ env.KERNEL_VERSION }}.${{ env.SUB_VERSION }} 内核（基于 AOSP 官方 android16-6.12-2026-03 源码分支）
           - KSU分支：${{ env.KSU_TYPENAME }}
+          - KSU版本号：${{ needs.build.outputs.ksuver }}（指定版本号则按指定的走，留空则自动对齐官方管理器最新APK版本）
           - susfs支持：${{ github.event.inputs.susfs_enable }}
           - KPM支持 ：${{ github.event.inputs.kpm_enable }}
           - LZ4支持：${{ github.event.inputs.lz4_enable }}
@@ -1316,8 +1494,8 @@ jobs:
           - ADIOS IO调度器支持：${{ github.event.inputs.adios_enable }}
           - Re-Kernel支持：${{ github.event.inputs.rekernel_enable }}
           - 内核级基带保护支持：${{ github.event.inputs.baseband_guard }}
-          - BakaSU管理器下载：[BakaSU_CI](https://github.com/cctv18/BakaSU_CI/releases)
-          - SukiSU Nova管理器下载：[SukiSU Nova](https://git.zako.shirkneko.top:20004/shirkneko/SukiSU/releases)
+          - BakaSU管理器下载：[BakaSU 安装说明](https://bakasu.org/zh-Hans/guide/install)
+          - SukiSU Nova管理器下载：[SukiSU Nova manager-ci apks](https://cnb.cool/sukisu-nova/Release/-/tree/manager-ci/apks)
           - KernelSU Next管理器下载：[KernelSU-Next](https://github.com/KernelSU-Next/KernelSU-Next/releases)
           - KSU原版管理器下载：[KernelSU](https://github.com/tiann/KernelSU/releases)
           
@@ -1330,7 +1508,7 @@ jobs:
           2. 若你的手机之前已有 root 权限，可在手机上安装[HorizonKernelFlasher](https://github.com/libxzr/HorizonKernelFlasher/releases)，在HorizonKernelFlasher中刷入AnyKernel刷机包并重启；
           3. 若你之前已刷入SukiSU Nova内核，可在 SukiSU Nova 管理器中直接刷入AnyKernel刷机包并重启（管理器包名为 com.sukisu.nova，与本内核匹配）；
           4. 刷入无lz4kd补丁版的内核前若刷入过lz4kd补丁版的内核，为避免出错，请先关闭zram模块；
-          5. 由于KernelSU上游更新了元模块功能，最新版KSU管理器（包括除KernelSU Next以外的各分支）需要配合元模块(metamodule)才能正常挂载模块。目前的元模块包括[meta overlayfs](https://github.com/KernelSU-Modules-Repo/meta-overlayfs), [mountify](https://github.com/backslashxx/mountify), [meta magicmount](https://github.com/7a72/meta-magic_mount/), [meta magic_mount rs](https://github.com/Tools-cx-app/meta-magic_mount/), [hybrid mount](https://github.com/YuzakiKokuban/meta-hybrid_mount)等。若你是第一次使用KSU或刚从旧版KSU管理器升级至新版，请先安装一个元模块，这样其他涉及系统挂载的模块才能正常运行；
+          5. 由于KernelSU上游更新了元模块功能，最新版KSU管理器（包括除KernelSU Next以外的各分支）需要配合元模块(metamodule)才能正常挂载模块。目前的元模块包括[meta overlayfs](https://github.com/KernelSU-Modules-Repo/meta-overlayfs), [mountify](https://github.com/backslashxx/mountify), [meta magicmount](https://github.com/7a72/meta-magic_mount/), [meta magicmount rs](https://github.com/Tools-cx-app/meta_magic_mount/), [hybrid mount](https://github.com/YuzakiKokuban/meta-hybrid_mount)等。若你是第一次使用KSU或刚从旧版KSU管理器升级至新版，请先安装一个元模块，这样其他涉及系统挂载的模块才能正常运行；
           6. KernelPatch Next（即KPN）是一个独立于KSU的KPM实现，可以运行在任意KSU/面具环境中（不适用于Apatch），且不能与内置的kpm功能共同使用，使用前请保证你的内核没有内置的kpm实现/修补。
           
           #### ※※※刷写内核有风险，为防止出现意外导致手机变砖，在刷入内核前请务必用[KernelFlasher](https://github.com/capntrips/KernelFlasher)等软件备份boot等关键启动分区!※※※
