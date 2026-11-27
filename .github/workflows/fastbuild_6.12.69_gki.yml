@@ -154,6 +154,16 @@ jobs:
             'exit 4' | sudo tee /usr/local/bin/aria2c >/dev/null
           sudo chmod +x /usr/local/bin/wget /usr/local/bin/aria2c
           
+          # git 全局加固：慢速即判定失败、禁止交互式要账号密码，避免 clone 永久挂起
+          echo "---- git 全局设置（防卡死）----"
+          git config --global http.lowSpeedLimit 2000
+          git config --global http.lowSpeedTime 30
+          git config --global http.postBuffer 524288000
+          git config --global advice.detachedHead false
+          echo "GIT_TERMINAL_PROMPT=0" >> $GITHUB_ENV
+          echo "GIT_ASKPASS=/bin/true" >> $GITHUB_ENV
+          git config --global --list | grep -E "lowspeed|postBuffer" || true
+          
           # ccache：apt 版兜底 + 尝试升级为仓库内置版本（下载失败不影响构建）
           command -v ccache >/dev/null 2>&1 || sudo apt-get install -y --no-install-recommends ccache || true
           for i in 1 2 3 4 5; do
@@ -342,6 +352,7 @@ jobs:
           elif [[ ${{ github.event.inputs.ksu_type }} == "sukisunova" ]]; then
             echo "正在配置 SukiSU Nova（原 GitHub 上的 SukiSU 已停止维护，现迁移至新平台）..."
             NOVA_URL="${{ env.NOVA_REPO_HOST }}/${{ env.NOVA_REPO_OWNER }}/${{ env.NOVA_REPO_NAME }}.git"
+            NOVA_ARCHIVE="${{ env.NOVA_REPO_HOST }}/${{ env.NOVA_REPO_OWNER }}/${{ env.NOVA_REPO_NAME }}/archive"
             if [[ "${{ github.event.inputs.susfs_enable }}" == "true" ]]; then
               NOVA_BRANCH="clean_code"
             else
@@ -349,18 +360,56 @@ jobs:
             fi
             echo "SukiSU Nova 目标分支: $NOVA_BRANCH（susfs_enable=${{ github.event.inputs.susfs_enable }}）"
             echo "仓库地址: $NOVA_URL"
+            echo "应急 tarball: $NOVA_ARCHIVE/$NOVA_BRANCH.tar.gz"
+            export GIT_TERMINAL_PROMPT=0
             NOVA_OK=0
-            for i in 1 2 3; do
-              rm -rf ./KernelSU
-              if git clone --branch "$NOVA_BRANCH" "$NOVA_URL" KernelSU; then
-                NOVA_OK=1
-                break
-              fi
-              echo "SukiSU Nova 克隆失败（第 $i 轮），重试..."
-              sleep 5
+            NOVA_MODE=""
+            # 三级降级：浅克隆 → 完整克隆 → 直接下 tarball（纯 HTTP，不碰 git 协议）
+            for mode in shallow full tarball; do
+              for i in 1 2; do
+                rm -rf ./KernelSU
+                echo "---- Nova 获取方式: $mode（第 $i 次尝试）----"
+                if [[ "$mode" == "tarball" ]]; then
+                  mkdir -p ./KernelSU
+                  if timeout 300 curl -fL --retry 2 --retry-delay 3 --connect-timeout 20 --max-time 300 \
+                       -o /tmp/nova.tar.gz "$NOVA_ARCHIVE/$NOVA_BRANCH.tar.gz" \
+                     && tar -xzf /tmp/nova.tar.gz -C ./KernelSU --strip-components=1; then
+                    NOVA_OK=1
+                    NOVA_MODE="tarball"
+                    echo "tarball 解压完成（无 .git，版本号走 API 兜底）"
+                    break 2
+                  fi
+                elif [[ "$mode" == "shallow" ]]; then
+                  if timeout 420 git clone --depth=1 --single-branch --branch "$NOVA_BRANCH" "$NOVA_URL" KernelSU; then
+                    NOVA_OK=1
+                    NOVA_MODE="shallow"
+                    break 2
+                  fi
+                else
+                  if timeout 600 git clone --branch "$NOVA_BRANCH" "$NOVA_URL" KernelSU; then
+                    NOVA_OK=1
+                    NOVA_MODE="full"
+                    break 2
+                  fi
+                fi
+                echo "$mode 方式失败或超时，换下一种/重试..."
+                sleep 5
+              done
             done
-            [ "$NOVA_OK" = "1" ] || { echo "::error title=nova-clone::SukiSU Nova 克隆失败（检查网络能否访问 ${{ env.NOVA_REPO_HOST }}）"; exit 1; }
-            [ -d ./KernelSU/kernel ] || { echo "::error title=nova-tree::SukiSU Nova 目录结构异常"; exit 1; }
+            rm -f /tmp/nova.tar.gz
+            [ "$NOVA_OK" = "1" ] || { echo "::error title=nova-clone::SukiSU Nova 三种获取方式全部失败（网络到 ${{ env.NOVA_REPO_HOST }} 不通）"; exit 1; }
+            echo "Nova 获取方式最终结果: $NOVA_MODE"
+            [ -d ./KernelSU/kernel ] || { echo "::error title=nova-tree::SukiSU Nova 目录结构异常（没有 kernel/ 目录）"; exit 1; }
+            # 关键修复：Nova 的 Kbuild 给 core/init.o 加了 -g0（去调试信息），
+            # 但开启 SUSFS 后 init.o 会导出符号，ACK 的 gendwarfksyms 需要 DWARF，
+            # 否则报 "dwarf_get_units failed: no debugging information?"。
+            # 这里把 Kbuild 里所有 -g0 换成 -g（只影响 vmlinux 调试段，不进最终 Image）
+            if [ -f ./KernelSU/kernel/Kbuild ]; then
+              sed -i 's/\(^\|[[:space:]]\)-g0\b/-g/g' ./KernelSU/kernel/Kbuild
+              echo "---- Nova Kbuild -g0 处理结果 ----"
+              grep -n -- "-g0" ./KernelSU/kernel/Kbuild || echo "已无 -g0 残留"
+              grep -n "CFLAGS_init.o += -g" ./KernelSU/kernel/Kbuild || echo "（未匹配到 -g 行，Kbuild 结构可能变了）"
+            fi
             # 手动建立符号链接与 Kconfig/Makefile 挂钩（其自带 setup.sh 的 clone 地址写错，不能直接跑）
             DRV="./common/drivers"
             rm -f "$DRV/kernelsu"
@@ -371,9 +420,9 @@ jobs:
             ls -l "$DRV/kernelsu"
             tail -n 2 "$DRV/Makefile"
             tail -n 2 "$DRV/Kconfig"
-            echo "Nova 实际提交: $(git -C KernelSU rev-parse HEAD)"
-            echo "Nova 当前分支: $(git -C KernelSU rev-parse --abbrev-ref HEAD)"
-            echo "::notice title=ksu-head::$(git -C KernelSU rev-parse HEAD)"
+            echo "Nova 当前提交: $(git -C KernelSU rev-parse HEAD 2>/dev/null || echo '无 .git（tarball 模式）')"
+            echo "Nova 当前分支: $(git -C KernelSU rev-parse --abbrev-ref HEAD 2>/dev/null || echo "$NOVA_BRANCH（tarball 模式）")"
+            echo "::notice title=ksu-head::$(git -C KernelSU rev-parse HEAD 2>/dev/null || echo "tarball-$NOVA_BRANCH")"
             N=$(curl -s -D - -o /dev/null --retry 3 --connect-timeout 20 \
                  "${{ env.NOVA_REPO_HOST }}/api/v1/repos/${{ env.NOVA_REPO_OWNER }}/${{ env.NOVA_REPO_NAME }}/commits?sha=${NOVA_BRANCH}&limit=1" \
                  | tr -d '\r' | sed -n 's/^[Xx]-[Tt]otal-[Cc]ount:[[:space:]]*\([0-9]*\).*/\1/p')
@@ -435,11 +484,11 @@ jobs:
             SUSFS_OK=0
             for i in 1 2 3; do
               rm -rf susfs4ksu
-              if git clone -b oki-${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }} https://github.com/cctv18/susfs4oki.git susfs4ksu; then
+              if timeout 300 git clone -b oki-${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }} https://github.com/cctv18/susfs4oki.git susfs4ksu; then
                 SUSFS_OK=1
                 break
               fi
-              echo "susfs4oki 克隆失败（第 $i 轮），重试..."
+              echo "susfs4oki 克隆失败或超时（第 $i 轮），重试..."
               sleep 5
             done
             [ "$SUSFS_OK" = "1" ] || { echo "::error title=susfs-clone::susfs4oki 克隆失败"; exit 1; }
@@ -564,11 +613,11 @@ jobs:
           ZRAM_SRC_OK=0
           for i in 1 2 3; do
             rm -rf "$GITHUB_ACTOR"
-            if git clone --depth=1 https://github.com/$GITHUB_REPOSITORY.git -b $GITHUB_REF_NAME "$GITHUB_ACTOR"; then
+            if timeout 300 git clone --depth=1 https://github.com/$GITHUB_REPOSITORY.git -b $GITHUB_REF_NAME "$GITHUB_ACTOR"; then
               ZRAM_SRC_OK=1
               break
             fi
-            echo "仓库克隆失败（第 $i 轮），重试..."
+            echo "仓库克隆失败或超时（第 $i 轮），重试..."
             sleep 5
           done
           if [ "$ZRAM_SRC_OK" = "1" ]; then
@@ -634,6 +683,9 @@ jobs:
           echo "CONFIG_KSU=y" >> ./common/arch/arm64/configs/gki_defconfig
           if [[ "${{ github.event.inputs.susfs_enable }}" == "false" ]]; then
             echo "CONFIG_KSU_SUSFS=n" >> ./common/arch/arm64/configs/gki_defconfig
+          fi
+          if [[ ${{ github.event.inputs.ksu_type }} == "sukisunova" ]]; then
+            echo "# CONFIG_KPM is not set" >> ./common/arch/arm64/configs/gki_defconfig
           fi
           echo "CONFIG_TMPFS_XATTR=y" >> ./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_TMPFS_POSIX_ACL=y" >> ./common/arch/arm64/configs/gki_defconfig
@@ -873,7 +925,7 @@ jobs:
             if [ ! -s "$so" ]; then
               echo "$so 仍不可用，改用 git clone 兜底..."
               rm -rf ../libsrc
-              if git clone --depth=1 --filter=blob:none --sparse https://github.com/$GITHUB_REPOSITORY.git -b $GITHUB_REF_NAME ../libsrc; then
+              if timeout 300 git clone --depth=1 --filter=blob:none --sparse https://github.com/$GITHUB_REPOSITORY.git -b $GITHUB_REF_NAME ../libsrc; then
                 git -C ../libsrc sparse-checkout set lib || true
                 cp -f ../libsrc/lib/$so . 2>/dev/null || true
               fi
@@ -950,9 +1002,6 @@ jobs:
             KSU_EXTRA="KSU_KERNEL_DIR=$KSU_REAL"
             echo "传给 make 的 KSU_KERNEL_DIR: $KSU_REAL"
             echo "---- KSU 关键文件检查 ----"
-            for h in include/klog.h include/uapi preinit/runner/runner.c asflags-y; do
-              :
-            done
             [ -e "$KSU_REAL/include/klog.h" ] && echo "  OK  include/klog.h" || echo "  --  include/klog.h 缺失"
             [ -e "$KSU_REAL/preinit/runner/runner.c" ] && echo "  OK  preinit/runner/runner.c" || echo "  --  preinit/runner/runner.c 缺失（该分支没有 preinit runner）"
           else
@@ -1095,11 +1144,11 @@ jobs:
           AK3_OK=0
           for i in 1 2 3; do
             rm -rf ./AnyKernel3
-            if git clone https://github.com/cctv18/AnyKernel3 --depth=1; then
+            if timeout 300 git clone https://github.com/cctv18/AnyKernel3 --depth=1; then
               AK3_OK=1
               break
             fi
-            echo "AnyKernel3 克隆失败（第 $i 轮），重试..."
+            echo "AnyKernel3 克隆失败或超时（第 $i 轮），重试..."
             sleep 5
           done
           [ "$AK3_OK" = "1" ] || { echo "::error title=ak3-clone::AnyKernel3 克隆失败"; exit 1; }
@@ -1281,7 +1330,7 @@ jobs:
           2. 若你的手机之前已有 root 权限，可在手机上安装[HorizonKernelFlasher](https://github.com/libxzr/HorizonKernelFlasher/releases)，在HorizonKernelFlasher中刷入AnyKernel刷机包并重启；
           3. 若你之前已刷入SukiSU Nova内核，可在 SukiSU Nova 管理器中直接刷入AnyKernel刷机包并重启（管理器包名为 com.sukisu.nova，与本内核匹配）；
           4. 刷入无lz4kd补丁版的内核前若刷入过lz4kd补丁版的内核，为避免出错，请先关闭zram模块；
-          5. 由于KernelSU上游更新了元模块功能，最新版KSU管理器（包括除KernelSU Next以外的各分支）需要配合元模块(metamodule)才能正常挂载模块。目前的元模块包括[meta overlayfs](https://github.com/KernelSU-Modules-Repo/meta-overlayfs), [mountify](https://github.com/backslashxx/mountify), [meta magicmount](https://github.com/7a72/meta-magic_mount/), [meta magicmount rs](https://github.com/Tools-cx-app/meta-magic_mount/), [hybrid mount](https://github.com/YuzakiKokuban/meta-hybrid_mount)等。若你是第一次使用KSU或刚从旧版KSU管理器升级至新版，请先安装一个元模块，这样其他涉及系统挂载的模块才能正常运行；
+          5. 由于KernelSU上游更新了元模块功能，最新版KSU管理器（包括除KernelSU Next以外的各分支）需要配合元模块(metamodule)才能正常挂载模块。目前的元模块包括[meta overlayfs](https://github.com/KernelSU-Modules-Repo/meta-overlayfs), [mountify](https://github.com/backslashxx/mountify), [meta magicmount](https://github.com/7a72/meta-magic_mount/), [meta magic_mount rs](https://github.com/Tools-cx-app/meta-magic_mount/), [hybrid mount](https://github.com/YuzakiKokuban/meta-hybrid_mount)等。若你是第一次使用KSU或刚从旧版KSU管理器升级至新版，请先安装一个元模块，这样其他涉及系统挂载的模块才能正常运行；
           6. KernelPatch Next（即KPN）是一个独立于KSU的KPM实现，可以运行在任意KSU/面具环境中（不适用于Apatch），且不能与内置的kpm功能共同使用，使用前请保证你的内核没有内置的kpm实现/修补。
           
           #### ※※※刷写内核有风险，为防止出现意外导致手机变砖，在刷入内核前请务必用[KernelFlasher](https://github.com/capntrips/KernelFlasher)等软件备份boot等关键启动分区!※※※
