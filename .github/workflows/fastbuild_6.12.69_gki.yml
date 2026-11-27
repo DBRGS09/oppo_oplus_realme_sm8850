@@ -114,14 +114,21 @@ jobs:
           echo "当前仓库：$GITHUB_REPOSITORY"
           echo "当前分支：$GITHUB_REF_NAME"
           
-          sudo apt-mark hold firefox &&
-          sudo apt-mark hold libc-bin &&
-          sudo apt purge man-db &&
-          sudo rm -rf /var/lib/man-db/auto-update &&
-          sudo apt update &&
-          sudo apt-get install -y --no-install-recommends binutils python-is-python3 libssl-dev libelf-dev libdw-dev &
-          #旧版完整指令：（由于经过验证大部分指令已内置于GitHub Action环境中，故进行精简）
-          #sudo apt-get install -y --no-install-recommends curl bison flex make binutils git perl gcc python3 python-is-python3 bc libssl-dev libelf-dev libdw-dev zip unzip ccache
+          # 依赖安装改为同步执行：装失败立刻可见，不再被 wait 吞掉
+          sudo apt-mark hold firefox || true
+          sudo apt-mark hold libc-bin || true
+          sudo apt-get purge -y man-db || true
+          sudo rm -rf /var/lib/man-db/auto-update
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends binutils python-is-python3 libssl-dev libelf-dev libdw-dev bc bison flex cpio kmod rsync zstd
+          echo "---- 关键工具自检 ----"
+          for t in bc bison flex perl python3 make cc gcc ld objcopy zstd cpio rsync; do
+            if command -v "$t" >/dev/null 2>&1; then
+              echo "$t => $(command -v "$t")"
+            else
+              echo "$t => 缺失"
+            fi
+          done
           
           #使用最新版ccache v4.12.2（Ubuntu软件仓库的版本并非最新）
           wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/lib/ccache-x86-64 -O ccache &&
@@ -433,30 +440,12 @@ jobs:
             cd kernel_workspace
             #开启TCP拥塞控制算法控制器（必需）
             echo "CONFIG_TCP_CONG_ADVANCED=y" >> ./common/arch/arm64/configs/gki_defconfig
-            ################################################################################################################################
-            # BBR：基于链路容量的代表拥塞控制算法，不再使用丢包、延时等信号去衡量拥塞是否发生，而是直接对网络建模来应对、避免真实的网络拥塞；
-            # 具有高吞吐、低延迟、抗丢包的特点，但在手机上使用时由于持续探测带宽/RTT、高频计算与发包增加 CPU 和射频模块功耗，会增加耗电及发热；
-            # 且移动基站缓冲区深度通常较小（~50ms），BBR 的带宽探测阶段（ProbeRTT）过度降窗可能导致吞吐量骤降，且网络切换（WiFi→5G）时需重新
-            # 探测参数，反而增加延迟或导致速率振荡（短暂卡顿），且存在 RTT 不公平性，与基于丢包的流竞争时可能过于强势，在混合网络环境中
-            #（如 BBR + CUBIC 共存），BBR 会抢占更多其他软件的带宽，降低其他应用的公平性（如后台软件更新影响前台视频播放）。
-            # 因此，虽然BBR可以显著减少排队延迟，抗丢包能力强，带宽利用率高，但由于其会增加耗电，且易导致网络速率波动，故安卓系统默认不使用
-            # BBR拥塞算法，而是使用在吞吐量、稳定性、兼容性、能效之间取得最佳平衡的CUBIC算法。在开启BBR前，请考虑自己是否真的有使用BBR的必要。
-            ################################################################################################################################
             echo "CONFIG_TCP_CONG_BBR=y" >> ./common/arch/arm64/configs/gki_defconfig
-            #CUBIC：安卓的默认TCP拥塞控制算法，在吞吐量、稳定性、兼容性、能效之间取得最佳平衡，具有高兼容性与公平性、抗网络波动性强、低计算开销的特点，是绝大部分移动场景的优先选择
             echo "CONFIG_TCP_CONG_CUBIC=y" >> ./common/arch/arm64/configs/gki_defconfig
-            #VEGAS：基于时延的拥塞控制算法之一，将回路响应时间（Round Trip Time，RTT）增加视为出现拥塞，增加时增大拥塞窗口，减小时减小拥塞窗口
             echo "CONFIG_TCP_CONG_VEGAS=y" >> ./common/arch/arm64/configs/gki_defconfig
-            #New Vegas：Vegas 算法的改进版，优化了 RTT 测量和竞争公平性，可以更准确地检测拥塞，与 Reno/CUBIC 共存能力提升
             echo "CONFIG_TCP_CONG_NV=y" >> ./common/arch/arm64/configs/gki_defconfig
-            #Westwood+：基于带宽估计（ACK 到达率）动态设置拥塞窗口和慢启动阈值；快速恢复，适合无线网络（区分拥塞丢包与无线丢包）
             echo "CONFIG_TCP_CONG_WESTWOOD=y" >> ./common/arch/arm64/configs/gki_defconfig
-            #HTCP：一种基于损失的算法，使用 AIMD 来控制拥塞窗口，根据 RTT 动态调整增长因子，结合延迟和丢包信号，针对高延迟的高速网络进行优化
             echo "CONFIG_TCP_CONG_HTCP=y" >> ./common/arch/arm64/configs/gki_defconfig
-            #brutal：一种通过主动探测 + 激进抢占最大化吞吐量的拥塞算法，无拥塞窗口上限，轻度丢包（<20%）不降窗，避免类似 BBR 的 ProbeRTT 阶段，
-            #持续维持高发送速率，与 Reno/CUBIC 共存时，Brutal 可通过高频发包抢占 90%+ 带宽，适用于高丢包弱网环境（如公共 Wi-Fi、蜂窝网络）及
-            #直播推流、云游戏上行链路等需优先保证吞吐量而非延迟敏感的场景，提升弱网吞吐性能，对抗运营商 QoS 限速。但由于TCP Brutal 仅在应用程序
-            #对每个 TCP 连接设置带宽参数之后才能正常工作，绝大部分安卓应用都不支持该操作，故请勿将 TCP Brutal 设置成默认拥塞控制算法。
             echo "CONFIG_TCP_CONG_BRUTAL=y" >> ./common/arch/arm64/configs/gki_defconfig
             if [[ "${{ github.event.inputs.bbr_enable }}" == "default" ]]; then
               echo "正在将BBR设为默认拥塞控制算法..."
@@ -494,12 +483,6 @@ jobs:
             echo "CONFIG_NETFILTER_XT_MATCH_ADDRTYPE=y" >> ./arch/arm64/configs/gki_defconfig
             echo "CONFIG_NETFILTER_XT_TARGET_LOG=y" >> ./arch/arm64/configs/gki_defconfig
             echo "CONFIG_NETFILTER_XT_MATCH_RECENT=y" >> ./arch/arm64/configs/gki_defconfig
-            # 未经测试的配置选项，可能导致bug
-            #echo "CONFIG_CGROUP_DEVICE=y" >> ./arch/arm64/configs/gki_defconfig
-            #echo "CONFIG_CGROUP_PIDS=y" >> ./arch/arm64/configs/gki_defconfig
-            #echo "CONFIG_FW_LOADER_COMPRESS=y" >> ./arch/arm64/configs/gki_defconfig
-            #echo "CONFIG_BRIDGE_NETFILTER=y" >> ./arch/arm64/configs/gki_defconfig
-            #echo "CONFIG_NF_TABLES=y" >> ./arch/arm64/configs/gki_defconfig
             # 开启 NTSync
             echo "CONFIG_NTSYNC=y" >> ./arch/arm64/configs/gki_defconfig
             if [[ "${{ github.event.inputs.droidspaces_enable }}" == "extend" ]]; then
@@ -508,10 +491,6 @@ jobs:
               echo "CONFIG_BT_HCIVHCI=y" >> ./arch/arm64/configs/gki_defconfig
               # 开启 systemd-coredump 支持
               echo "CONFIG_STATIC_USERMODEHELPER=n" >> ./arch/arm64/configs/gki_defconfig
-              # 添加 Lindroid EVDI DRM 驱动
-              # wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/${{ env.KERNEL_VERSION }}/droidspaces_patch/evdi_drm.patch
-              # patch -p1 -F 3 < evdi_drm.patch || true
-              # echo "CONFIG_DRM_LINDROID_EVDI=y" >> ./arch/arm64/configs/gki_defconfig
             fi
           fi
 
@@ -550,7 +529,7 @@ jobs:
             for f in ./common/scripts/setlocalversion; do
               sed -i "\$s|echo \"\\\$res\"|echo \"-${{ github.event.inputs.kernel_suffix }}\"|" "$f"
             done
-            sudo sed -i 's/-4k/-${{ github.event.inputs.KERNEL_SUFFIX }}/g' ./common/arch/arm64/configs/gki_defconfig
+            sudo sed -i 's/-4k/-${{ github.event.inputs.kernel_suffix }}/g' ./common/arch/arm64/configs/gki_defconfig
           else
             echo "当前内核版本后缀：${{ env.KERNEL_NAME }}"
             for f in ./common/scripts/setlocalversion; do
@@ -696,13 +675,25 @@ jobs:
         if: failure()
         working-directory: kernel_workspace
         run: |
+          found=0
           for f in build-defconfig.log build-image.log; do
             [ -f "$f" ] || continue
-            echo "===== $f 错误摘要 ====="
-            grep -nE "Error [0-9]|\*\*\*|error:|Please wait|You should integrate|undefined reference|No rule to make target|Kconfig" "$f" | tail -n 60
-            echo "----- 该文件末尾 40 行 -----"
-            tail -n 40 "$f"
+            found=1
+            echo "===== $f ====="
+            grep -nE "Error [0-9]|\*\*\*|error:|Please wait|You should integrate|undefined reference|No rule to make target|No such file|not found" "$f" | tail -n 40
+            echo "----- 该文件末尾 30 行 -----"
+            tail -n 30 "$f"
+            grep -E "error:|Error [0-9]|\*\*\*|Please wait|You should integrate|undefined reference|No such file|not found" "$f" | tail -n 5 | while IFS= read -r line; do
+              echo "::error title=${f}::$(printf '%s' "$line" | tr -d '\r' | cut -c1-400)"
+            done
           done
+          if [ "$found" = "0" ]; then
+            echo "::error title=no-build-log::构建日志不存在，失败发生在“构建内核”之前"
+            for t in bc bison flex perl python3 make cc gcc ld objcopy zstd cpio rsync ccache; do
+              p=$(command -v "$t" 2>/dev/null || echo MISSING)
+              echo "::error title=tool-$t::$p"
+            done
+          fi
 
       - name: 保存新的 ccache 缓存
         if: inputs.ccache_update || steps.ccache-restore.outputs.cache-hit != 'true'
