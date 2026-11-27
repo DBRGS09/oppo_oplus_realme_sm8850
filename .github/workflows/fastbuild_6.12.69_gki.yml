@@ -7,23 +7,27 @@ env:
   SUB_VERSION: '69_gki'
   KERNEL_NAME: 'android16-6-g43b5ab7e247d-abogki561813157-4k'
   CCACHE_KEY: ccache-ecsv4-gki-6.12.69
+  NOVA_REPO_OWNER: 'shirkneko'
+  NOVA_REPO_NAME: 'SukiSU'
+  NOVA_REPO_HOST: 'https://git.zako.shirkneko.top:20004'
 
 on:
   workflow_dispatch:
     inputs:
       ksu_type:
-        description: 'KernelSU分支(BakaSU/SukiSU Ultra/KernelSU Next/KSU(原版)/无内置KSU,默认BakaSU)'
+        description: 'KernelSU分支(BakaSU/SukiSU Ultra/SukiSU Nova/KernelSU Next/KSU(原版)/无内置KSU,默认BakaSU)'
         required: true
         type: choice
         default: 'bakasu'
         options:
           - 'bakasu'
           - 'sukisu'
+          - 'sukisunova'
           - 'ksunext'
           - 'ksu'
           - 'none'
       susfs_enable:
-        description: '是否开启susfs(用于增强隐藏环境挂载功能; 可能轻微增加耗电，上游更新导致不稳定时或不需要可关闭)'
+        description: '是否开启susfs(增强隐藏环境挂载; SukiSU Nova 开启时自动使用带内置SUSFS的 clean_code 分支)'
         required: true
         type: boolean
         default: 'true'
@@ -335,13 +339,57 @@ jobs:
             KSU_VERSION=$(expr $(git rev-list --count main) + 30700 2>/dev/null || echo 114514)
             echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
             echo "ksuver=$KSU_VERSION" >> $GITHUB_OUTPUT
+          elif [[ ${{ github.event.inputs.ksu_type }} == "sukisunova" ]]; then
+            echo "正在配置 SukiSU Nova（原 GitHub 上的 SukiSU 已停止维护，现迁移至新平台）..."
+            NOVA_URL="${{ env.NOVA_REPO_HOST }}/${{ env.NOVA_REPO_OWNER }}/${{ env.NOVA_REPO_NAME }}.git"
+            if [[ "${{ github.event.inputs.susfs_enable }}" == "true" ]]; then
+              NOVA_BRANCH="clean_code"
+            else
+              NOVA_BRANCH="main"
+            fi
+            echo "SukiSU Nova 目标分支: $NOVA_BRANCH（susfs_enable=${{ github.event.inputs.susfs_enable }}）"
+            echo "仓库地址: $NOVA_URL"
+            NOVA_OK=0
+            for i in 1 2 3; do
+              rm -rf ./KernelSU
+              if git clone --branch "$NOVA_BRANCH" "$NOVA_URL" KernelSU; then
+                NOVA_OK=1
+                break
+              fi
+              echo "SukiSU Nova 克隆失败（第 $i 轮），重试..."
+              sleep 5
+            done
+            [ "$NOVA_OK" = "1" ] || { echo "::error title=nova-clone::SukiSU Nova 克隆失败（检查网络能否访问 ${{ env.NOVA_REPO_HOST }}）"; exit 1; }
+            [ -d ./KernelSU/kernel ] || { echo "::error title=nova-tree::SukiSU Nova 目录结构异常"; exit 1; }
+            # 手动建立符号链接与 Kconfig/Makefile 挂钩（其自带 setup.sh 的 clone 地址写错，不能直接跑）
+            DRV="./common/drivers"
+            rm -f "$DRV/kernelsu"
+            ln -sfn "$(realpath --relative-to="$DRV" "$(pwd)/KernelSU/kernel")" "$DRV/kernelsu"
+            grep -q "kernelsu" "$DRV/Makefile" || printf '\nobj-$(CONFIG_KSU) += kernelsu/\n' >> "$DRV/Makefile"
+            grep -q "drivers/kernelsu/Kconfig" "$DRV/Kconfig" || printf '\nsource "drivers/kernelsu/Kconfig"\n' >> "$DRV/Kconfig"
+            echo "---- 链接检查 ----"
+            ls -l "$DRV/kernelsu"
+            tail -n 2 "$DRV/Makefile"
+            tail -n 2 "$DRV/Kconfig"
+            echo "Nova 实际提交: $(git -C KernelSU rev-parse HEAD)"
+            echo "Nova 当前分支: $(git -C KernelSU rev-parse --abbrev-ref HEAD)"
+            echo "::notice title=ksu-head::$(git -C KernelSU rev-parse HEAD)"
+            N=$(curl -s -D - -o /dev/null --retry 3 --connect-timeout 20 \
+                 "${{ env.NOVA_REPO_HOST }}/api/v1/repos/${{ env.NOVA_REPO_OWNER }}/${{ env.NOVA_REPO_NAME }}/commits?sha=${NOVA_BRANCH}&limit=1" \
+                 | tr -d '\r' | sed -n 's/^[Xx]-[Tt]otal-[Cc]ount:[[:space:]]*\([0-9]*\).*/\1/p')
+            [ -n "$N" ] || N=$(git -C KernelSU rev-list --count HEAD 2>/dev/null || echo 1)
+            echo "Nova 提交计数: $N"
+            KSU_VERSION=$((30000 + N + 996))
+            echo "NOVA_BRANCH=$NOVA_BRANCH" >> $GITHUB_ENV
+            echo "KSU_BUILD_REF=桂烁" >> $GITHUB_ENV
+            echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
+            echo "ksuver=$KSU_VERSION" >> $GITHUB_OUTPUT
           elif [[ ${{ github.event.inputs.ksu_type }} == "ksunext" ]]; then
             echo "正在配置KernelSU Next..."
             fetch_setup "https://raw.githubusercontent.com/pershoot/KernelSU-Next/refs/heads/dev-susfs/kernel/setup.sh" /tmp/ksun_setup.sh || { echo "::error title=ksun-setup::KernelSU-Next setup.sh 下载失败"; exit 1; }
             bash /tmp/ksun_setup.sh dev-susfs || { echo "::error title=ksun-setup::KernelSU-Next setup.sh 执行失败"; exit 1; }
             rm -f /tmp/ksun_setup.sh
             [ -d KernelSU-Next ] || { echo "::error title=ksun-setup::KernelSU-Next 源码目录不存在"; exit 1; }
-            echo "KSUNext 实际提交: $(git -C . rev-parse HEAD 2>/dev/null || echo unknown)"
             cd KernelSU-Next
             rm -rf .git
             N=$(curl -sI --retry 3 --connect-timeout 20 "https://api.github.com/repos/pershoot/KernelSU-Next/commits?sha=dev&per_page=1" | grep -i "link:" | sed -n 's/.*page=\([0-9]*\)>; rel="last".*/\1/p')
@@ -402,6 +450,9 @@ jobs:
             cp ./susfs4ksu/kernel_patches/include/linux/* ./common/include/linux/
             cd ./common
             patch -p1 -F 3 < 50_add_susfs_in_gki-${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }}.patch || true
+            echo "---- SUSFS 关键文件检查 ----"
+            [ -f fs/susfs.c ] && echo "fs/susfs.c 已就位" || echo "fs/susfs.c 缺失"
+            [ -f include/linux/susfs.h ] && echo "include/linux/susfs.h 已就位" || echo "include/linux/susfs.h 缺失"
             cd ..
           else
             echo "已选择无内置KernelSU模式，跳过susfs配置..."
@@ -423,7 +474,7 @@ jobs:
               cd ./KernelSU-Next
               patch -p1 -F 3 < 10_enable_susfs_for_ksu_next.patch || true
             else
-              echo "::warning title=ksun-susfs::未找到 KernelSU-Next 的 SUSFS 附加补丁，跳过"
+              echo "::warning title=ksun-susfs::未找到 KernelSU-Next 的 SUSFS 附加补丁，跳过（Nova 分支自身已内置 SUSFS 调用点）"
             fi
           fi
 
@@ -433,12 +484,17 @@ jobs:
           cd kernel_workspace/common
           python3 - <<'PYEOF'
           import re
+          import sys
 
           p = "fs/proc/task_mmu.c"
           s = open(p, encoding="utf-8", errors="surrogateescape").read()
           orig_len = len(s)
 
           marker = "SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file))"
+          if "CONFIG_KSU_SUSFS_SUS_MAP" not in s:
+              print("未检测到 SUS_MAP 补丁内容（本次可能没打 SUSFS 补丁），直接跳过修复")
+              sys.exit(0)
+
           region_re = re.compile(
               r"([ \t]*)#ifdef[ \t]+CONFIG_KSU_SUSFS_SUS_MAP[ \t]*\r?\n(?:.*?\r?\n)*?[ \t]*#endif[^\n]*\r?\n",
               re.S,
@@ -540,21 +596,37 @@ jobs:
         if: inputs.susfs_enable
         run: |
           cd kernel_workspace
-          echo "CONFIG_KSU_SUSFS=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_SUS_PATH=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_SUS_KSTAT=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_TRY_UMOUNT=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_ENABLE_LOG=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_SUS_MAP=y" >> ./common/arch/arm64/configs/gki_defconfig
+          if [[ ${{ github.event.inputs.ksu_type }} == "sukisunova" ]]; then
+            echo "SukiSU Nova 使用其内置 SUSFS 配置项"
+            echo "CONFIG_KSU_SUSFS=y" >> ./common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_KSU_SUSFS_INLINE_HOOK=y" >> ./common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_KSU_SUSFS_SUS_PATH=y" >> ./common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y" >> ./common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_KSU_SUSFS_SUS_KSTAT=y" >> ./common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y" >> ./common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_KSU_SUSFS_ENABLE_LOG=y" >> ./common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y" >> ./common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y" >> ./common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y" >> ./common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_KSU_SUSFS_SUS_MAP=y" >> ./common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_KSU_SUSFS_PRIORITY_UID_FILTER=y" >> ./common/arch/arm64/configs/gki_defconfig
+          else
+            echo "CONFIG_KSU_SUSFS=y" >> ./common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y" >> ./common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_KSU_SUSFS_SUS_PATH=y" >> ./common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y" >> ./common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y" >> ./common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT=y" >> ./common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_KSU_SUSFS_SUS_KSTAT=y" >> ./common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_KSU_SUSFS_TRY_UMOUNT=y" >> ./common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT=y" >> ./common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y" >> ./common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_KSU_SUSFS_ENABLE_LOG=y" >> ./common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y" >> ./common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y" >> ./common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y" >> ./common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_KSU_SUSFS_SUS_MAP=y" >> ./common/arch/arm64/configs/gki_defconfig
+          fi
           
       - name: 添加 KSU & 其他配置项
         run: |
@@ -766,7 +838,7 @@ jobs:
           echo "Bindgen版本: $BINDGEN_VERSION"
           pahole_version=$(pahole --version 2>/dev/null | head -n1); [ -z "$pahole_version" ] && echo "pahole版本：未安装" || echo "pahole版本：$pahole_version"
           
-          # 版本横幅：构建者、构建号、构建时间（对应 /proc/version 里的 (名字@主机) #1 SMP PREEMPT 时间）
+          # 版本横幅：构建者、构建号、构建时间
           export KBUILD_BUILD_USER="桂烁"
           export KBUILD_BUILD_HOST="aosp"
           export KBUILD_BUILD_VERSION=1
@@ -865,8 +937,7 @@ jobs:
           KCFLAGS+=" -fmacro-prefix-map=$ROOT_REAL_PATH=."
           KCFLAGS+=" -ffile-prefix-map=$ROOT_REAL_PATH=."
           
-          # 强制补齐 KernelSU 系源码（tiann / KernelSU-Next）的头文件搜索路径
-          # 原因：这两家的 Kbuild 靠 $(src)/$(srcroot) 推算路径，在 symlink + O=out 场景会算空，导致 klog.h 等找不到
+          # 强制补齐 KernelSU 系源码（tiann / KernelSU-Next / SukiSU Nova）的头文件搜索路径
           KSU_LINK="$COMMON_REAL_PATH/drivers/kernelsu"
           if [ -d "$KSU_LINK" ]; then
             KSU_REAL=$(readlink -f "$KSU_LINK")
@@ -874,11 +945,11 @@ jobs:
             ls "$KSU_REAL" | head -n 30
             KCFLAGS+=" -I$KSU_REAL -I$KSU_REAL/include -I$KSU_REAL/include/uapi -I$KSU_REAL/.."
             echo "---- KSU 头文件检查 ----"
-            for h in klog.h include/uapi/app_profile.h include/ksu_samsung_kdp.h; do
-              if [ -e "$KSU_REAL/$h" ] || [ -e "$KSU_REAL/$(echo $h | sed 's|include/||')" ]; then
+            for h in include/klog.h uapi/app_profile.h include/uapi; do
+              if [ -e "$KSU_REAL/$h" ]; then
                 echo "  OK  $h"
               else
-                echo "  --  $h 未找到（该分支可能没有这个头文件）"
+                echo "  --  $h 未找到"
               fi
             done
           else
@@ -912,6 +983,27 @@ jobs:
           sudo rm -rf /opt/hostedtoolcache/CodeQL &
           set -o pipefail
           make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="clang" LD="ld.lld" OBJCOPY="llvm-objcopy" O=out gki_defconfig 2>&1 | tee ../build-defconfig.log
+          
+          # 为吃 usr/include 判断的 KernelSU 分支（tiann / KSUNext / Nova）安装 UAPI 头文件，
+          # 否则它们会定义 KSU_NO_PREINIT 而跳过 preinit 编译，导致 SUSFS 补丁在 fs/exec.c 里引用的
+          # ksu_setup_preinit_file / ksu_preinit_handle_post_execveat 变成未定义符号
+          PREINIT_NEEDED="false"
+          if [[ ${{ github.event.inputs.ksu_type }} == "ksu" || ${{ github.event.inputs.ksu_type }} == "ksunext" || ${{ github.event.inputs.ksu_type }} == "sukisunova" ]]; then
+            PREINIT_NEEDED="true"
+            if make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="clang" LD="ld.lld" O=out headers_install 2>&1 | tail -n 5; then
+              echo "headers_install 完成"
+            else
+              echo "::warning title=headers-install::headers_install 失败，preinit 可能不可用"
+            fi
+            if [ -f out/usr/include/linux/unistd.h ]; then
+              echo "out/usr/include/linux/unistd.h 已就位，KernelSU 的 preinit 会被编译"
+              echo "::notice title=preinit::preinit 已启用（符号齐全）"
+            else
+              echo "out/usr/include/linux/unistd.h 不存在，KernelSU 可能跳过 preinit"
+              echo "::notice title=preinit::preinit 未启用（可能链接报 undefined symbol）"
+            fi
+          fi
+          
           export CC="$(pwd)/cc-wrapper" && export LD="$(pwd)/ld-wrapper"
           make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="$(pwd)/cc-wrapper" LD="$(pwd)/ld-wrapper" OBJCOPY="llvm-objcopy" O=out Image 2>&1 | tee ../build-image.log
           
@@ -1028,6 +1120,8 @@ jobs:
           
           if [[ ${{ github.event.inputs.ksu_type }} == "sukisu" ]]; then
             KSU_TYPENAME="SukiSU"
+          elif [[ ${{ github.event.inputs.ksu_type }} == "sukisunova" ]]; then
+            KSU_TYPENAME="SukiSUNova"
           elif [[ ${{ github.event.inputs.ksu_type }} == "bakasu" ]]; then
             KSU_TYPENAME="BakaSU"
           elif [[ ${{ github.event.inputs.ksu_type }} == "ksunext" ]]; then
@@ -1137,6 +1231,8 @@ jobs:
           echo "TAG_HEAD=$TAG_HEAD" >> $GITHUB_ENV
           if [[ ${{ github.event.inputs.ksu_type }} == "sukisu" ]]; then
             KSU_TYPENAME="SukiSU Ultra"
+          elif [[ ${{ github.event.inputs.ksu_type }} == "sukisunova" ]]; then
+            KSU_TYPENAME="SukiSU Nova"
           elif [[ ${{ github.event.inputs.ksu_type }} == "bakasu" ]]; then
             KSU_TYPENAME="BakaSU"
           elif [[ ${{ github.event.inputs.ksu_type }} == "ksunext" ]]; then
@@ -1171,7 +1267,7 @@ jobs:
           - Re-Kernel支持：${{ github.event.inputs.rekernel_enable }}
           - 内核级基带保护支持：${{ github.event.inputs.baseband_guard }}
           - BakaSU管理器下载：[BakaSU_CI](https://github.com/cctv18/BakaSU_CI/releases)
-          - SukiSU Ultra管理器下载：[SukiSU-Ultra](https://github.com/SukiSU-Ultra/SukiSU-Ultra/releases)
+          - SukiSU Nova管理器下载：[SukiSU Nova](https://git.zako.shirkneko.top:20004/shirkneko/SukiSU/releases)
           - KernelSU Next管理器下载：[KernelSU-Next](https://github.com/KernelSU-Next/KernelSU-Next/releases)
           - KSU原版管理器下载：[KernelSU](https://github.com/tiann/KernelSU/releases)
           
@@ -1182,10 +1278,10 @@ jobs:
           ### 📋 安装方法 | Installation Guide
           1. 若你的手机已经安装了第三方Recovery（如TWRP)，可下载对应机型的AnyKernel刷机包后进入Recovery模式，通过Recovery刷入刷机包后重启设备；
           2. 若你的手机之前已有 root 权限，可在手机上安装[HorizonKernelFlasher](https://github.com/libxzr/HorizonKernelFlasher/releases)，在HorizonKernelFlasher中刷入AnyKernel刷机包并重启；
-          3. 若你之前已刷入SukiSU Ultra内核，且SukiSU Ultra管理器已更新至最新版本，可在SukiSU Ultra管理器中直接刷入AnyKernel刷机包并重启；
+          3. 若你之前已刷入SukiSU Nova内核，可在 SukiSU Nova 管理器中直接刷入AnyKernel刷机包并重启（管理器包名为 com.sukisu.nova，与本内核匹配）；
           4. 刷入无lz4kd补丁版的内核前若刷入过lz4kd补丁版的内核，为避免出错，请先关闭zram模块；
           5. 由于KernelSU上游更新了元模块功能，最新版KSU管理器（包括除KernelSU Next以外的各分支）需要配合元模块(metamodule)才能正常挂载模块。目前的元模块包括[meta overlayfs](https://github.com/KernelSU-Modules-Repo/meta-overlayfs), [mountify](https://github.com/backslashxx/mountify), [meta magicmount](https://github.com/7a72/meta-magic_mount/), [meta magicmount rs](https://github.com/Tools-cx-app/meta-magic_mount/), [hybrid mount](https://github.com/YuzakiKokuban/meta-hybrid_mount)等。若你是第一次使用KSU或刚从旧版KSU管理器升级至新版，请先安装一个元模块，这样其他涉及系统挂载的模块才能正常运行；
-          6. KernelPatch Next（即KPN）是一个独立于KSU的KPM实现，可以运行在任意KSU/面具环境中（不适用于Apatch），且不能与(Re)SukiSU内置的kpm功能共同使用，使用前请保证你的内核没有内置的kpm实现/修补。
+          6. KernelPatch Next（即KPN）是一个独立于KSU的KPM实现，可以运行在任意KSU/面具环境中（不适用于Apatch），且不能与内置的kpm功能共同使用，使用前请保证你的内核没有内置的kpm实现/修补。
           
           #### ※※※刷写内核有风险，为防止出现意外导致手机变砖，在刷入内核前请务必用[KernelFlasher](https://github.com/capntrips/KernelFlasher)等软件备份boot等关键启动分区!※※※
           EOF
