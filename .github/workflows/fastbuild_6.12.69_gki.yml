@@ -118,7 +118,6 @@ jobs:
           sudo apt-mark hold libc-bin || true
           sudo apt-get purge -y man-db || true
           sudo rm -rf /var/lib/man-db/auto-update
-          fora=1
           for i in 1 2 3; do
             sudo apt-get update && break
             echo "apt-get update 第 $i 轮失败，重试..."
@@ -420,6 +419,37 @@ jobs:
 
           p = "fs/proc/task_mmu.c"
           s = open(p, encoding="utf-8", errors="surrogateescape").read()
+          orig_len = len(s)
+
+          marker = "SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file))"
+          region_re = re.compile(
+              r"([ \t]*)#ifdef[ \t]+CONFIG_KSU_SUSFS_SUS_MAP[ \t]*\r?\n(?:.*?\r?\n)*?[ \t]*#endif[^\n]*\r?\n",
+              re.S,
+          )
+
+          cnt = {"goto": 0, "decl": 0, "block": 0}
+
+          def classify(m):
+              t = m.group(0)
+              if "bypass_orig_flow" in t:
+                  cnt["goto"] += 1
+                  return ""
+              if "struct vm_area_struct *vma;" in t:
+                  cnt["decl"] += 1
+                  return ""
+              if marker in t and "return 0;" in t:
+                  cnt["block"] += 1
+                  return ""
+              return t
+
+          s = region_re.sub(classify, s)
+          print("region removed:", cnt)
+
+          s, n1 = re.subn(r"[ \t]*if[ \t]*\([^\n]*\)[ \t]*\{\r?\n[ \t]*goto[ \t]+bypass_orig_flow;[ \t]*\r?\n[ \t]*\}[ \t]*\r?\n", "", s)
+          s, n2 = re.subn(r"[ \t]*if[ \t]*\([^\n]*\)[ \t]*\r?\n[ \t]*goto[ \t]+bypass_orig_flow;[ \t]*\r?\n", "", s)
+          s, n3 = re.subn(r"[ \t]*goto[ \t]+bypass_orig_flow;[ \t]*\r?\n", "", s)
+          s, n4 = re.subn(r"[ \t]*bypass_orig_flow:[ \t]*\r?\n", "", s)
+          print("leftover removed: brace=%d if=%d goto=%d label=%d" % (n1, n2, n3, n4))
 
           A = ("#ifdef CONFIG_KSU_SUSFS_SUS_MAP\n"
                "\tif (vma->vm_file) {\n"
@@ -427,19 +457,6 @@ jobs:
                "\t\t\treturn 0;\n"
                "\t}\n"
                "#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MAP\n")
-
-          A_re = re.compile(r"#ifdef CONFIG_KSU_SUSFS_SUS_MAP\r?\n[ \t]*if \(vma->vm_file\) \{\r?\n[ \t]*if \(SUSFS_IS_INODE_SUS_MAP\(file_inode\(vma->vm_file\)\)\)\r?\n[ \t]*return 0;\r?\n[ \t]*\}\r?\n#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MAP\r?\n")
-          B_re = re.compile(r"#ifdef CONFIG_KSU_SUSFS_SUS_MAP\r?\n[ \t]*struct vm_area_struct \*vma;\r?\n#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MAP\r?\n")
-          C1_re = re.compile(r"#ifdef CONFIG_KSU_SUSFS_SUS_MAP\r?\n[ \t]*vma = vma_lookup\(mm, start_vaddr\);\r?\n[ \t]*if \(vma && vma->vm_file && SUSFS_IS_INODE_SUS_MAP\(file_inode\(vma->vm_file\)\)\)\r?\n[ \t]*goto bypass_orig_flow;\r?\n#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MAP\r?\n")
-          C2_re = re.compile(r"#ifdef CONFIG_KSU_SUSFS_SUS_MAP\r?\nbypass_orig_flow:\r?\n#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MAP\r?\n")
-
-          removed = 0
-          for rex in (A_re, C1_re, B_re, C2_re):
-              hits = rex.findall(s)
-              if hits:
-                  removed += len(hits)
-                  s = rex.sub("", s)
-          print("stray blocks removed:", removed)
 
           anchor = ("static int show_smap(struct seq_file *m, void *v)\n"
                     "{\n"
@@ -449,12 +466,21 @@ jobs:
           if anchor in s:
               i = s.index(anchor) + len(anchor)
               s = s[:i] + A + "\n" + s[i:]
-              print("inserted correct SUS_MAP block into show_smap")
+              print("inserted A into show_smap")
           else:
               print("WARN: show_smap anchor not found, skip insert")
 
+          if "bypass_orig_flow" in s:
+              print("ERROR: bypass_orig_flow still present in task_mmu.c")
+          else:
+              print("OK: no bypass_orig_flow left")
+
+          print("---- 校验 ----")
+          print("SUS_MAP 区段数量:", s.count("CONFIG_KSU_SUSFS_SUS_MAP"))
+          print("goto 残留:", s.count("goto bypass_orig_flow"))
+
           open(p, "w", encoding="utf-8", errors="surrogateescape").write(s)
-          print("task_mmu.c repaired, size =", len(s))
+          print("task_mmu.c repaired, size:", orig_len, "->", len(s))
           PYEOF
 
       - name: 应用lz4 1.10.0 & zstd 1.5.7补丁
@@ -699,7 +725,7 @@ jobs:
           sed -i 's/${scm_version}//' ./common/scripts/setlocalversion
           echo "CONFIG_LOCALVERSION_AUTO=n" >> ./common/arch/arm64/configs/gki_defconfig
           
-          # 强制版本横幅里的 SMP / PREEMPT 标记（不追加的话 GKI 会显示成 PREEMPT_DYNAMIC）
+          # 强制版本横幅里的 SMP / PREEMPT 标记（不覆盖的话 GKI 会显示成 PREEMPT_DYNAMIC）
           echo 'smp-flag-y := SMP' >> ./common/init/Makefile
           echo 'preempt-flag-y := PREEMPT' >> ./common/init/Makefile
           tail -n 4 ./common/init/Makefile
@@ -857,7 +883,7 @@ jobs:
           echo "内核编译完成！"
           echo "===== 内核版本串确认 ====="
           strings out/arch/arm64/boot/Image 2>/dev/null | grep -m1 "Linux version" || echo "（未取到版本串）"
-          echo "===== 内核签名/作者信息 ====="
+          echo "===== 内核作者信息 ====="
           strings out/arch/arm64/boot/Image 2>/dev/null | grep -m1 "桂烁" || echo "（未取到作者串）"
           if [[ "${{ github.event.inputs.ccache_debug }}" == "true" ]]; then
             echo "正在打包ccache日志及调试信息..."
