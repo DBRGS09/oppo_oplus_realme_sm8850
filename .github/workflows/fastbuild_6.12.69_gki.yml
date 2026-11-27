@@ -264,9 +264,12 @@ jobs:
           cd kernel_workspace
           if [[ ${{ github.event.inputs.ksu_type }} == "sukisu" || ${{ github.event.inputs.ksu_type }} == "bakasu" ]]; then
             echo "正在配置BakaSU（由于SukiSU长期未维护无法正常编译，且BakaSU兼容sukisu管理器，故SukiSU源码仓库已重定向为bakasu）..."
-            curl -LSs "https://raw.githubusercontent.com/Baka-SU/BakaSU/refs/heads/main/kernel/setup.sh" | bash -s 5fbf06ffb720c5651f2dc542cda819c89a7545a9
+            curl -LSs "https://raw.githubusercontent.com/Baka-SU/BakaSU/refs/heads/main/kernel/setup.sh" | bash -s main
             echo 'CONFIG_KSU_FULL_NAME_FORMAT="%TAG_NAME%-%COMMIT_SHA%@cctv18"' >> ./common/arch/arm64/configs/gki_defconfig
             cd ./KernelSU
+            # 探针：确认实际使用的 BakaSU 提交
+            echo "KSU 实际提交: $(git rev-parse HEAD)"
+            echo "::notice title=ksu-head::$(git rev-parse HEAD)"
             # 生成自定义版本号（基于提交计数）, 失败时使用 114514
             KSU_VERSION=$(expr $(git rev-list --count main) + 30700 2>/dev/null || echo 114514)
             # 存储版本号到 GitHub 环境变量
@@ -305,8 +308,10 @@ jobs:
           cd kernel_workspace
           if [[ ${{ github.event.inputs.ksu_type }} != "none" ]]; then
             echo "正在添加susfs补丁..."
-            git clone -b oki-${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }} https://github.com/cctv18/susfs4oki.git susfs4ksu &&
-            git -C susfs4ksu checkout a2225e22ec007dc111238f5b3258235173d4f0e6
+            git clone -b oki-${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }} https://github.com/cctv18/susfs4oki.git susfs4ksu
+            # 探针：确认实际使用的 SUSFS 提交
+            echo "SUSFS 实际提交: $(git -C susfs4ksu rev-parse HEAD)"
+            echo "::notice title=susfs-head::$(git -C susfs4ksu rev-parse HEAD)"
             cp ./susfs4ksu/kernel_patches/50_add_susfs_in_gki-${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }}.patch ./common/
             cp ./susfs4ksu/kernel_patches/fs/* ./common/fs/
             cp ./susfs4ksu/kernel_patches/include/linux/* ./common/include/linux/
@@ -680,12 +685,23 @@ jobs:
             [ -f "$f" ] || continue
             found=1
             echo "===== $f ====="
-            grep -nE "Error [0-9]|\*\*\*|error:|Please wait|You should integrate|undefined reference|No rule to make target|No such file|not found" "$f" | tail -n 40
-            echo "----- 该文件末尾 30 行 -----"
-            tail -n 30 "$f"
-            grep -E "error:|Error [0-9]|\*\*\*|Please wait|You should integrate|undefined reference|No such file|not found" "$f" | tail -n 5 | while IFS= read -r line; do
-              echo "::error title=${f}::$(printf '%s' "$line" | tr -d '\r' | cut -c1-400)"
+            echo "--- 前 5 处真正的报错 ---"
+            grep -nE "error:|Stop\.|\*\*\*" "$f" | grep -vE "^[0-9]+:make(\[[0-9]+\])?: \*\*\*" | head -n 5
+            first=$(grep -nE "error:|Stop\." "$f" | head -n 1 | cut -d: -f1)
+            if [ -n "$first" ]; then
+              s=$(( first>25 ? first-25 : 1 ))
+              echo "--- 第一处报错前后（第 $s 行起） ---"
+              sed -n "${s},$(( first+5 ))p" "$f"
+            fi
+            echo "--- 末尾 15 行 ---"
+            tail -n 15 "$f"
+            grep -E "error:|Stop\.|\*\*\*" "$f" | grep -vE "^make(\[[0-9]+\])?: \*\*\*" | head -n 4 | while IFS= read -r line; do
+              echo "::error title=${f}-first::$(printf '%s' "$line" | tr -d '\r' | cut -c1-380)"
             done
+            if [ -n "$first" ]; then
+              ctx=$(sed -n "$(( first>3 ? first-3 : 1 )),$(( first+1 ))p" "$f" | tr '\n' '|' | tr -d '\r' | cut -c1-380)
+              echo "::error title=${f}-context::${ctx}"
+            fi
           done
           if [ "$found" = "0" ]; then
             echo "::error title=no-build-log::构建日志不存在，失败发生在“构建内核”之前"
