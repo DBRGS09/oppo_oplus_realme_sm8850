@@ -275,7 +275,19 @@ jobs:
           cd kernel_workspace
           if [[ ${{ github.event.inputs.ksu_type }} == "sukisu" || ${{ github.event.inputs.ksu_type }} == "bakasu" ]]; then
             echo "正在配置BakaSU（由于SukiSU长期未维护无法正常编译，且BakaSU兼容sukisu管理器，故SukiSU源码仓库已重定向为bakasu）..."
-            curl -LSs "https://raw.githubusercontent.com/Baka-SU/BakaSU/refs/heads/main/kernel/setup.sh" | bash -s main
+            # 下载 setup.sh：带重试 + 内容校验，绝不把 504 的 HTML 喂给 bash
+            KSU_OK=0
+            for i in 1 2 3 4 5; do
+              if curl -fL --retry 3 --retry-delay 3 --connect-timeout 20 -o /tmp/ksu_setup.sh \
+                   "https://raw.githubusercontent.com/Baka-SU/BakaSU/refs/heads/main/kernel/setup.sh" \
+                 && head -n 5 /tmp/ksu_setup.sh | grep -qE '^#!|^[[:space:]]*set '; then
+                bash /tmp/ksu_setup.sh main && KSU_OK=1 && break
+              fi
+              echo "BakaSU setup.sh 下载失败，第 $i 次重试..."
+              sleep 5
+            done
+            rm -f /tmp/ksu_setup.sh
+            [ "$KSU_OK" = "1" ] && [ -d ./KernelSU ] || { echo "::error title=ksu-setup::BakaSU 源码拉取失败"; exit 1; }
             echo 'CONFIG_KSU_FULL_NAME_FORMAT="%TAG_NAME%-%COMMIT_SHA%@cctv18"' >> ./common/arch/arm64/configs/gki_defconfig
             cd ./KernelSU
             # 探针：确认实际使用的 BakaSU 提交
@@ -579,8 +591,34 @@ jobs:
           cd kernel_workspace
           echo "CONFIG_BBG=y" >> ./common/arch/arm64/configs/gki_defconfig
           cd ./common
-          curl -sSL https://github.com/cctv18/Baseband-guard/raw/master/setup.sh | bash
-          sed -i '/^config LSM$/,/^help$/{ /^[[:space:]]*default/ { /baseband_guard/! s/selinux/selinux,baseband_guard/ } }' security/Kconfig
+          # 下载 Baseband-guard 的 setup.sh：带重试 + 内容校验，绝不把 504 的 HTML 喂给 bash
+          BBG_OK=0
+          for i in 1 2 3 4 5; do
+            if curl -fL --retry 3 --retry-delay 3 --connect-timeout 20 -o bbg_setup.sh \
+                 "https://raw.githubusercontent.com/cctv18/Baseband-guard/master/setup.sh"; then
+              if head -n 5 bbg_setup.sh | grep -qE '^#!|^[[:space:]]*set '; then
+                BBG_OK=1
+                echo "Baseband-guard setup.sh 下载成功（$(wc -c < bbg_setup.sh) 字节）"
+                break
+              fi
+              echo "下载到的内容不是脚本（疑似网关拦截页），重试..."
+            fi
+            echo "Baseband-guard setup.sh 下载失败，第 $i 次重试..."
+            sleep 5
+          done
+          if [ "$BBG_OK" != "1" ]; then
+            rm -f bbg_setup.sh
+            echo "::warning title=bbg-download::Baseband-guard setup.sh 下载失败，已自动关闭本次基带保护以免出现半吊子状态"
+            cd ..
+            sed -i '/^CONFIG_BBG=y$/d' ./common/arch/arm64/configs/gki_defconfig
+          else
+            bash bbg_setup.sh
+            rm -f bbg_setup.sh
+            sed -i '/^config LSM$/,/^help$/{ /^[[:space:]]*default/ { /baseband_guard/! s/selinux/selinux,baseband_guard/ } }' security/Kconfig
+            echo "---- LSM 默认值检查 ----"
+            grep -n "baseband_guard" security/Kconfig | head -n 3
+            grep -rn "CONFIG_BBG" security/ | head -n 3
+          fi
 
       - name: 添加制作名称
         run: |
