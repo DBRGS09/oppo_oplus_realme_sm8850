@@ -937,21 +937,24 @@ jobs:
           KCFLAGS+=" -fmacro-prefix-map=$ROOT_REAL_PATH=."
           KCFLAGS+=" -ffile-prefix-map=$ROOT_REAL_PATH=."
           
-          # 强制补齐 KernelSU 系源码（tiann / KernelSU-Next / SukiSU Nova）的头文件搜索路径
+          # 强制补齐 KernelSU 系源码（tiann / KernelSU-Next / SukiSU Nova / BakaSU）的头文件搜索路径，
+          # 并把 KSU_KERNEL_DIR 用命令行变量钉成绝对路径：
+          # O=out 构建时 Kbuild 里的 $(srctree)/$(src) 会被算成 ../../drivers/kernelsu，
+          # 导致 preinit/runner/runner.c 这类 make 依赖直接找不到（KCFLAGS 管不到 make 依赖）
+          KSU_EXTRA=""
           KSU_LINK="$COMMON_REAL_PATH/drivers/kernelsu"
           if [ -d "$KSU_LINK" ]; then
             KSU_REAL=$(readlink -f "$KSU_LINK")
             echo "KernelSU 源码真实路径: $KSU_REAL"
-            ls "$KSU_REAL" | head -n 30
             KCFLAGS+=" -I$KSU_REAL -I$KSU_REAL/include -I$KSU_REAL/include/uapi -I$KSU_REAL/.."
-            echo "---- KSU 头文件检查 ----"
-            for h in include/klog.h uapi/app_profile.h include/uapi; do
-              if [ -e "$KSU_REAL/$h" ]; then
-                echo "  OK  $h"
-              else
-                echo "  --  $h 未找到"
-              fi
+            KSU_EXTRA="KSU_KERNEL_DIR=$KSU_REAL"
+            echo "传给 make 的 KSU_KERNEL_DIR: $KSU_REAL"
+            echo "---- KSU 关键文件检查 ----"
+            for h in include/klog.h include/uapi preinit/runner/runner.c asflags-y; do
+              :
             done
+            [ -e "$KSU_REAL/include/klog.h" ] && echo "  OK  include/klog.h" || echo "  --  include/klog.h 缺失"
+            [ -e "$KSU_REAL/preinit/runner/runner.c" ] && echo "  OK  preinit/runner/runner.c" || echo "  --  preinit/runner/runner.c 缺失（该分支没有 preinit runner）"
           else
             echo "提示: 未找到 drivers/kernelsu（ksu_type=none 时正常）"
           fi
@@ -982,15 +985,13 @@ jobs:
           sudo rm -rf /opt/ghc &
           sudo rm -rf /opt/hostedtoolcache/CodeQL &
           set -o pipefail
-          make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="clang" LD="ld.lld" OBJCOPY="llvm-objcopy" O=out gki_defconfig 2>&1 | tee ../build-defconfig.log
+          make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="clang" LD="ld.lld" OBJCOPY="llvm-objcopy" O=out gki_defconfig $KSU_EXTRA 2>&1 | tee ../build-defconfig.log
           
           # 为吃 usr/include 判断的 KernelSU 分支（tiann / KSUNext / Nova）安装 UAPI 头文件，
           # 否则它们会定义 KSU_NO_PREINIT 而跳过 preinit 编译，导致 SUSFS 补丁在 fs/exec.c 里引用的
           # ksu_setup_preinit_file / ksu_preinit_handle_post_execveat 变成未定义符号
-          PREINIT_NEEDED="false"
           if [[ ${{ github.event.inputs.ksu_type }} == "ksu" || ${{ github.event.inputs.ksu_type }} == "ksunext" || ${{ github.event.inputs.ksu_type }} == "sukisunova" ]]; then
-            PREINIT_NEEDED="true"
-            if make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="clang" LD="ld.lld" O=out headers_install 2>&1 | tail -n 5; then
+            if make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="clang" LD="ld.lld" O=out headers_install $KSU_EXTRA 2>&1 | tail -n 5; then
               echo "headers_install 完成"
             else
               echo "::warning title=headers-install::headers_install 失败，preinit 可能不可用"
@@ -1005,7 +1006,7 @@ jobs:
           fi
           
           export CC="$(pwd)/cc-wrapper" && export LD="$(pwd)/ld-wrapper"
-          make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="$(pwd)/cc-wrapper" LD="$(pwd)/ld-wrapper" OBJCOPY="llvm-objcopy" O=out Image 2>&1 | tee ../build-image.log
+          make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="$(pwd)/cc-wrapper" LD="$(pwd)/ld-wrapper" OBJCOPY="llvm-objcopy" O=out Image $KSU_EXTRA 2>&1 | tee ../build-image.log
           
           echo "--- 编译后环境时间: $(LD_PRELOAD=$PRELOAD_LIBS date) ---"
           echo "--- 编译后环境文件时间戳: ---"
