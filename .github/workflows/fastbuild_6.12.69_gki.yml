@@ -679,23 +679,33 @@ jobs:
             cd ./KernelSU
             KSU_TAG=""
             if [ -n "$KSU_GH_TARGET" ]; then
-              KSU_TAG=$(tag_by_version_local "." "$KSU_GH_TARGET" 30000 || true)
-              [ -n "$KSU_TAG" ] || KSU_TAG=$(tag_by_version_api "tiann/KernelSU" "$KSU_GH_TARGET" || true)
-              KSU_HIT=0
-              if [ -n "$KSU_TAG" ]; then
-                if git checkout "$KSU_TAG"; then
-                  echo "已把 KernelSU 切到 tag $KSU_TAG（版本 $KSU_GH_TARGET）"
-                  KSU_HIT=1
+              if [[ "${{ github.event.inputs.susfs_enable }}" == "true" ]]; then
+                # 关键：susfs4oki 的 10_enable_susfs_for_ksu.patch 是针对 main 的文件结构写的
+                # （它的上下文里有 #include "preinit/preinit.h"），切到旧 tag 会让补丁只打上一半，
+                # 于是 init.c 里还留着 ksu_late_loaded / ksu_lsm_hook_init 的调用，而头文件里的声明已被补丁删掉
+                # → "use of undeclared identifier"。所以开 SUSFS 时源码一律保持 main 最新，只把版本号钉成目标值。
+                echo "检测到开启 SUSFS：KernelSU 源码保持 main 最新（旧 tag 会让 SUSFS 附加补丁只打上一半）"
+                echo "版本号稍后由 force_kbuild_version 直接写进 Kbuild，管理器看到的仍然是 $KSU_GH_TARGET"
+                echo "::notice title=ksu-ref::SUSFS 开启，源码保持 main，仅把内核内版本号对齐为 $KSU_GH_TARGET"
+              else
+                KSU_TAG=$(tag_by_version_local "." "$KSU_GH_TARGET" 30000 || true)
+                [ -n "$KSU_TAG" ] || KSU_TAG=$(tag_by_version_api "tiann/KernelSU" "$KSU_GH_TARGET" || true)
+                KSU_HIT=0
+                if [ -n "$KSU_TAG" ]; then
+                  if git checkout "$KSU_TAG"; then
+                    echo "已把 KernelSU 切到 tag $KSU_TAG（版本 $KSU_GH_TARGET）"
+                    KSU_HIT=1
+                  fi
                 fi
-              fi
-              if [ "$KSU_HIT" = "0" ]; then
-                KSU_SHA=$(commit_by_version_api "tiann/KernelSU" "main" "$KSU_GH_TARGET" 30000 || true)
-                if [ -n "$KSU_SHA" ]; then
-                  git checkout "$KSU_SHA" && echo "已把 KernelSU 切到提交 $KSU_SHA（版本 $KSU_GH_TARGET）" && KSU_HIT=1
+                if [ "$KSU_HIT" = "0" ]; then
+                  KSU_SHA=$(commit_by_version_api "tiann/KernelSU" "main" "$KSU_GH_TARGET" 30000 || true)
+                  if [ -n "$KSU_SHA" ]; then
+                    git checkout "$KSU_SHA" && echo "已把 KernelSU 切到提交 $KSU_SHA（版本 $KSU_GH_TARGET）" && KSU_HIT=1
+                  fi
                 fi
-              fi
-              if [ "$KSU_HIT" = "0" ]; then
-                echo "::warning title=ksu-ref::KernelSU 无法定位版本 $KSU_GH_TARGET 的源码，源码保持分支最新（版本号仍按 $KSU_GH_TARGET 显示）"
+                if [ "$KSU_HIT" = "0" ]; then
+                  echo "::warning title=ksu-ref::KernelSU 无法定位版本 $KSU_GH_TARGET 的源码，源码保持分支最新（版本号仍按 $KSU_GH_TARGET 显示）"
+                fi
               fi
             fi
             echo "KSU 实际提交: $(git rev-parse HEAD)"
@@ -750,22 +760,52 @@ jobs:
           fi
           if [[ ${{ github.event.inputs.ksu_type }} == "ksu" ]]; then
             echo "正在为原版 KernelSU (tiann/KernelSU)添加补丁..."
-            if [ -f ./susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch ]; then
-              cp ./susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch ./KernelSU/
+            KSU_SUSFS_PATCH=./susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch
+            if [ -f "$KSU_SUSFS_PATCH" ]; then
+              cp "$KSU_SUSFS_PATCH" ./KernelSU/
               cd ./KernelSU
-              patch -p1 -F 3 < 10_enable_susfs_for_ksu.patch || true
+              # 这个补丁是「整套换成老架构 + 接上 SUSFS」，只对特定 KernelSU 快照能 100% 打上。
+              # 先 dry-run：只要有一个 hunk 打不上，就整体跳过并回滚，
+              # 否则会出现「一半新一半旧」的混合代码（ksu_late_loaded / ksu_lsm_hook_init 未声明就是这么来的）。
+              if patch -p1 -N --dry-run -F 3 < 10_enable_susfs_for_ksu.patch > /tmp/ksu_susfs_dryrun.log 2>&1; then
+                patch -p1 -N -F 3 < 10_enable_susfs_for_ksu.patch > /tmp/ksu_susfs_apply.log 2>&1 || true
+                if [ -n "$(find . -name '*.rej' -print -quit 2>/dev/null)" ]; then
+                  echo "::warning title=ksu-susfs::补丁实际写入时有冲突，已回滚到打补丁前（内核侧 SUSFS 不受影响）"
+                  find . -name '*.rej' -delete 2>/dev/null || true
+                  find . -name '*.orig' -delete 2>/dev/null || true
+                  git checkout -- . 2>/dev/null || true
+                  git clean -fdq 2>/dev/null || true
+                else
+                  echo "SUSFS 附加补丁已完整打上（无 .rej）"
+                  echo "::notice title=ksu-susfs::KernelSU 的 SUSFS 附加补丁已完整应用"
+                fi
+                rm -f 10_enable_susfs_for_ksu.patch
+              else
+                echo "::warning title=ksu-susfs::补丁与当前 KernelSU 版本不匹配（dry-run 未通过），已整体跳过：源码保持原样，内核侧 SUSFS 仍然生效，只是管理器里的 SUSFS 页面可能读不到数据"
+                echo "---- dry-run 失败位置（前 15 行）----"
+                head -n 15 /tmp/ksu_susfs_dryrun.log || true
+                rm -f 10_enable_susfs_for_ksu.patch
+              fi
+              cd ..
+            elif grep -rqi "susfs" ./KernelSU/kernel/ 2>/dev/null; then
+              echo "KernelSU 源码已内置 SUSFS 调用点，无需附加补丁 —— 属正常情况"
+              echo "::notice title=ksu-susfs::KernelSU 已内置 SUSFS 调用点，无需附加补丁（正常）"
             else
-              echo "::warning title=ksu-susfs::未找到 KernelSU 的 SUSFS 附加补丁，跳过"
+              echo "::warning title=ksu-susfs::未找到 KernelSU 的 SUSFS 附加补丁，且源码中也没检测到 SUSFS 调用点"
             fi
           fi
           if [[ ${{ github.event.inputs.ksu_type }} == "ksunext" ]]; then
-            echo "正在为 KernelSU Next 添加 SUSFS 附加补丁（若上游提供）..."
+            echo "正在检查 KernelSU Next 的 SUSFS 集成方式..."
             if [ -f ./susfs4ksu/kernel_patches/KernelSU-Next/10_enable_susfs_for_ksu_next.patch ]; then
               cp ./susfs4ksu/kernel_patches/KernelSU-Next/10_enable_susfs_for_ksu_next.patch ./KernelSU-Next/
               cd ./KernelSU-Next
               patch -p1 -F 3 < 10_enable_susfs_for_ksu_next.patch || true
+              echo "已为 KernelSU-Next 打上 SUSFS 附加补丁"
+            elif grep -rqi "susfs" ./KernelSU-Next/kernel/ 2>/dev/null; then
+              echo "KernelSU-Next 源码已内置 SUSFS 调用点（pershoot dev-susfs 分支自带），无需附加补丁 —— 属正常情况"
+              echo "::notice title=ksun-susfs::KernelSU-Next 已内置 SUSFS 调用点，无需附加补丁（正常）"
             else
-              echo "::warning title=ksun-susfs::未找到 KernelSU-Next 的 SUSFS 附加补丁，跳过（Nova 分支自身已内置 SUSFS 调用点）"
+              echo "::warning title=ksun-susfs::未找到 KernelSU-Next 的 SUSFS 附加补丁，且源码中也没检测到 SUSFS 调用点，SUSFS 可能不生效"
             fi
           fi
 
