@@ -327,7 +327,53 @@ jobs:
             cd ./KernelSU
             patch -p1 -F 3 < 10_enable_susfs_for_ksu.patch || true
           fi
-          
+
+      - name: 修复 SUSFS 补丁在 6.12.69 上的错位(task_mmu)
+        if: inputs.susfs_enable && inputs.ksu_type != 'none'
+        run: |
+          cd kernel_workspace/common
+          python3 - <<'PYEOF'
+          import re
+
+          p = "fs/proc/task_mmu.c"
+          s = open(p, encoding="utf-8", errors="surrogateescape").read()
+
+          A = ("#ifdef CONFIG_KSU_SUSFS_SUS_MAP\n"
+               "\tif (vma->vm_file) {\n"
+               "\t\tif (SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file)))\n"
+               "\t\t\treturn 0;\n"
+               "\t}\n"
+               "#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MAP\n")
+
+          A_re = re.compile(r"#ifdef CONFIG_KSU_SUSFS_SUS_MAP\r?\n[ \t]*if \(vma->vm_file\) \{\r?\n[ \t]*if \(SUSFS_IS_INODE_SUS_MAP\(file_inode\(vma->vm_file\)\)\)\r?\n[ \t]*return 0;\r?\n[ \t]*\}\r?\n#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MAP\r?\n")
+          B_re = re.compile(r"#ifdef CONFIG_KSU_SUSFS_SUS_MAP\r?\n[ \t]*struct vm_area_struct \*vma;\r?\n#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MAP\r?\n")
+          C1_re = re.compile(r"#ifdef CONFIG_KSU_SUSFS_SUS_MAP\r?\n[ \t]*vma = vma_lookup\(mm, start_vaddr\);\r?\n[ \t]*if \(vma && vma->vm_file && SUSFS_IS_INODE_SUS_MAP\(file_inode\(vma->vm_file\)\)\)\r?\n[ \t]*goto bypass_orig_flow;\r?\n#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MAP\r?\n")
+          C2_re = re.compile(r"#ifdef CONFIG_KSU_SUSFS_SUS_MAP\r?\nbypass_orig_flow:\r?\n#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MAP\r?\n")
+
+          removed = 0
+          for rex in (A_re, C1_re, B_re, C2_re):
+              hits = rex.findall(s)
+              if hits:
+                  removed += len(hits)
+                  s = rex.sub("", s)
+          print("stray blocks removed:", removed)
+
+          anchor = ("static int show_smap(struct seq_file *m, void *v)\n"
+                    "{\n"
+                    "\tstruct vm_area_struct *vma = v;\n"
+                    "\tstruct mem_size_stats mss = {};\n")
+
+          if anchor in s:
+              i = s.index(anchor) + len(anchor)
+              s = s[:i] + A + "\n" + s[i:]
+              print("inserted correct SUS_MAP block into show_smap")
+          else:
+              print("WARN: show_smap anchor not found, skip insert")
+
+          open(p, "w", encoding="utf-8", errors="surrogateescape").write(s)
+          print("task_mmu.c repaired, size =", len(s))
+          PYEOF
+
       - name: 应用lz4 1.10.0 & zstd 1.5.7补丁
         if: inputs.lz4_enable
         run: |
