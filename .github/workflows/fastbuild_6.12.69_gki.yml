@@ -326,140 +326,35 @@ jobs:
             ccache -sv
           fi
 
-      - name: 添加KernelSU
-        id: ksu_version
+      - name: 添加KernelSU（公共函数与目标版本）
+        if: inputs.ksu_type != 'none'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           cd kernel_workspace
-          GH_API="https://api.github.com"
-          NOVA_API="${{ env.NOVA_REPO_HOST }}/api/v1/repos/${{ env.NOVA_REPO_OWNER }}/${{ env.NOVA_REPO_NAME }}"
+          # 公共函数写成独立脚本，供后面各分支 source。
+          # 原因：GitHub 对单个 run 脚本的表达式长度有上限（约 2 万字符），
+          # 原来那一个巨型步骤已经 22,912 字符，直接触发
+          # "Exceeded max expression length" 导致整个工作流被判为 invalid。
+          printf '%s' 'R0hfQVBJPSJodHRwczovL2FwaS5naXRodWIuY29tIgpOT1ZBX0FQST0iJE5PVkFfUkVQT19IT1NUL2FwaS92MS9yZXBvcy8kTk9WQV9SRVBPX09XTkVSLyROT1ZBX1JFUE9fTkFNRSIKCiMg5bimIHRva2VuIOeahCBHaXRIdWIgQVBJ77yI6YG/5YWNIFJ1bm5lciDljL/lkI3pmZDmtYEgNDAzIOWvvOiHtOmdmem7mOWksei0pe+8iQpnaF9jdXJsKCkgewogIGlmIFsgLW4gIiR7R0hfVE9LRU46LX0iIF07IHRoZW4KICAgIGN1cmwgLXNMIC0tcmV0cnkgMyAtLXJldHJ5LWRlbGF5IDIgLS1jb25uZWN0LXRpbWVvdXQgMjAgXAogICAgICAtSCAiQXV0aG9yaXphdGlvbjogQmVhcmVyICR7R0hfVE9LRU59IiBcCiAgICAgIC1IICJBY2NlcHQ6IGFwcGxpY2F0aW9uL3ZuZC5naXRodWIranNvbiIgIiRAIgogIGVsc2UKICAgIGN1cmwgLXNMIC0tcmV0cnkgMyAtLXJldHJ5LWRlbGF5IDIgLS1jb25uZWN0LXRpbWVvdXQgMjAgXAogICAgICAtSCAiQWNjZXB0OiBhcHBsaWNhdGlvbi92bmQuZ2l0aHViK2pzb24iICIkQCIKICBmaQp9CgpmZXRjaF9zZXR1cCgpIHsKICBsb2NhbCB1cmw9IiQxIiBvdXQ9IiQyIiBpCiAgZm9yIGkgaW4gMSAyIDMgNCA1OyBkbwogICAgaWYgY3VybCAtZkwgLS1yZXRyeSAzIC0tcmV0cnktZGVsYXkgMyAtLWNvbm5lY3QtdGltZW91dCAyMCAtbyAiJG91dCIgIiR1cmwiIFwKICAgICAgICYmIGhlYWQgLW4gNSAiJG91dCIgfCBncmVwIC1xRSAnXiMhfF5bWzpzcGFjZTpdXSpzZXQgJzsgdGhlbgogICAgICByZXR1cm4gMAogICAgZmkKICAgIGVjaG8gInNldHVwLnNoIOS4i+i9veWksei0pe+8iOesrCAkaSDova7vvIk6ICR1cmwiID4mMgogICAgc2xlZXAgNQogIGRvbmUKICByZXR1cm4gMQp9CgojIOaKiiBLYnVpbGQg6YeM566X5Ye65p2l55qE54mI5pys5Y+355u05o6l6ZKJ5oiQ5oyH5a6a5YC8CiMg5Zub5Liq5YiG5pSv55qEIEtidWlsZCDlhpnms5XlkITkuI3nm7jlkIzvvIzov5nph4zkuIDmrKHlhajlhbzlrrnvvJoKIyAgIHRpYW5uIC8gS2VybmVsU1UtTmV4dCA6ICQoZXZhbCBLU1VfVkVSU0lPTj0kKHNoZWxsIGV4cHIgMzAwMDAgKyAkKEtTVV9HSVRfVkVSU0lPTikpKQojICAgQmFrYVNVICAgICAgICAgICAgICAgIDogS1NVX1ZFUlNJT04gOj0gJChzaGVsbCBleHByIDMwMDAwICsgJChLU1VfTE9DQUxfVkVSU0lPTikgKyA3MDApCiMgICBTdWtpU1UgTm92YSAgICAgICAgICAgOiBLU1VfVkVSU0lPTiAgICAgOj0gJChpZiAkKExPQ0FMX0NPVU5UKSwkKHNoZWxsIGV4cHIgLi4uKSwkKFZFUlNJT05fQkFTRSkpCiMg5Y+q6KaB5oqK44CMS1NVX1ZFUlNJT04g55qE5a6a5LmJ6KGM44CN5o2i5o6J77yM5LiL6Z2i5peg6K66IGNjZmxhZ3MteSDov5jmmK8gQ0ZMQUdTX2luaXQubyDpg73kvJrot5/nnYDlj5gKZm9yY2Vfa2J1aWxkX3ZlcnNpb24oKSB7CiAgbG9jYWwga2I9IiQxIiB2ZXI9IiQyIgogIGlmIFsgISAtZiAiJGtiIiBdOyB0aGVuIGVjaG8gIu+8iEtidWlsZCDkuI3lrZjlnKjvvIzot7Pov4flvLrliLbniYjmnKw6ICRrYu+8iSI7IHJldHVybiAwOyBmaQogICMgMSkgdGlhbm4gLyBLZXJuZWxTVS1OZXh0IOeahCBldmFsIOWGmeazlQogIHNlZCAtaSAic3xeXCQoZXZhbCBLU1VfVkVSU0lPTj0uKnxcJChldmFsIEtTVV9WRVJTSU9OPSR7dmVyfSl8IiAiJGtiIgogICMgMikgQmFrYVNVIC8gTm92YSDnmoQgOj0g5YaZ5rOV77yI5LiN5Lya6K+v5LykIEtTVV9WRVJTSU9OX0ZVTEwgLyBLU1VfVkVSU0lPTl9UQUfvvIkKICBzZWQgLWkgInN8XlxcKEtTVV9WRVJTSU9OW1s6c3BhY2U6XV0qOj1cXCkuKnxcXDEgJHt2ZXJ9fCIgIiRrYiIKICAjIDMpIEtlcm5lbFNVLU5leHQg5Y675o6JIC5naXQg5ZCO6LWw55qE5pivIEZBTExCQUNLIOWIhuaUrwogIHNlZCAtaSAic3xeXFwoS1NVX1ZFUlNJT05fRkFMTEJBQ0tbWzpzcGFjZTpdXSo6PVxcKS4qfFxcMSAke3Zlcn18IiAiJGtiIgogICMgNCkgdGlhbm4g5Zyo5pegIGdpdCDml7bnlKjnmoQgMTYg5YWc5bqVCiAgc2VkIC1pICJzfF5cXChjY2ZsYWdzLXkgKz0gLURLU1VfVkVSU0lPTj1cXCkxNiR8XFwxJHt2ZXJ9fCIgIiRrYiIKICBlY2hvICItLS0tIOWGheaguOWGhSBLU1VfVkVSU0lPTiDlt7LlvLrliLbkuLogJHt2ZXJ977yIJGti77yJLS0tLSIKICBncmVwIC1uRSAnS1NVX1ZFUlNJT05bWzpzcGFjZTpdXSo6PXxcJFwoZXZhbCBLU1VfVkVSU0lPTj18S1NVX1ZFUlNJT05fRkFMTEJBQ0tbWzpzcGFjZTpdXSo6PXxES1NVX1ZFUlNJT049JyAiJGtiIiB8IGhlYWQgLW4gMTAgfHwgdHJ1ZQp9CgojIOS7jiBHaXRIdWIgbGF0ZXN0IHJlbGVhc2Ug55qEIEFQSyDmlofku7blkI3ph4zor7vlh7ogNX42IOS9jeeJiOacrOWPtwpnaF9hcGtfdmVyc2lvbigpIHsKICBnaF9jdXJsICIkR0hfQVBJL3JlcG9zLyQxL3JlbGVhc2VzL2xhdGVzdCIgXAogICAgfCB0ciAne30sJyAnXG5cblxuJyBcCiAgICB8IGdyZXAgLW9FICdbQS1aYS16MC05Xy4rLV0rXC5hcGsnIFwKICAgIHwgZ3JlcCAtb0UgJ1swLTldezUsNn0nIHwgc29ydCAtbiB8IHRhaWwgLW4gMQp9CgojIOeJiOacrOWPtyDihpIgdGFn77yI56a757q/77ya5pys5Zyw5a6M5pW05YWL6ZqG6YeM5omA5pyJIHRhZyDnmoTmj5DkuqTmlbDlj43nrpfvvIzkuI3pnIDopoHku7vkvZUgQVBJ77yJCnRhZ19ieV92ZXJzaW9uX2xvY2FsKCkgewogIGxvY2FsIGRpcj0iJDEiIHRhcmdldD0iJDIiIGJhc2U9IiQzIiB0IGMKICBmb3IgdCBpbiAkKGdpdCAtQyAiJGRpciIgdGFnIC1sICd2KicgLS1zb3J0PS12OnJlZm5hbWUgMj4vZGV2L251bGwgfCBoZWFkIC1uIDEwMCk7IGRvCiAgICBjPSQoZ2l0IC1DICIkZGlyIiByZXYtbGlzdCAtLWNvdW50ICIkdCIgMj4vZGV2L251bGwpCiAgICBbIC1uICIkYyIgXSB8fCBjb250aW51ZQogICAgaWYgWyAkKChiYXNlICsgYykpIC1lcSAiJHRhcmdldCIgXTsgdGhlbiBlY2hvICIkdCI7IHJldHVybiAwOyBmaQogIGRvbmUKICByZXR1cm4gMQp9CgojIOeJiOacrOWPtyDihpIgdGFn77yI6IGU572R5YWc5bqV77yacmVsZWFzZSDph4zmib4gQVBLIOWQjeW4piBf54mI5pys5Y+3LSDnmoTpgqPkuKogdGFn77yJCnRhZ19ieV92ZXJzaW9uX2FwaSgpIHsKICBnaF9jdXJsICIkR0hfQVBJL3JlcG9zLyQxL3JlbGVhc2VzP3Blcl9wYWdlPTEwMCIgXAogICAgfCB0ciAne30sJyAnXG5cblxuJyBcCiAgICB8IHNlZCAtbiAncy8uKiJ0YWdfbmFtZSI6IlwoW14iXSpcKSIuKi9UQUcgXDEvcDsgcy8uKiJuYW1lIjoiXChbXiJdKlwuYXBrXCkiLiovQVBLIFwxL3AnIFwKICAgIHwgYXdrIC12IHY9IiQyIiAnCiAgICAgICAgJDE9PSJUQUciIHsgdGFnPSQyIH0KICAgICAgICAkMT09IkFQSyIgeyBpZiAoaW5kZXgoJDIsICJfIiB2ICItIikgPiAwKSB7IHByaW50IHRhZzsgZXhpdCB9IH0nCn0KCiMg54mI5pys5Y+3IOKGkiDmj5DkuqQgc2hh77yI6IGU572R5YWc5bqV77ya5oyJ44CM5Z+65pWwICsg5o+Q5Lqk5pWw44CN5Y+N5p+l56ys5Yeg5Liq5o+Q5Lqk77yJCmNvbW1pdF9ieV92ZXJzaW9uX2FwaSgpIHsKICBsb2NhbCByZXBvPSIkMSIgYnJhbmNoPSIkMiIgdmVyPSIkMyIgYmFzZT0iJDQiIHRvdGFsIHRhcmdldCBwYWdlIHNoYQogIHRvdGFsPSQoZ2hfY3VybCAtRCAtIC1vIC9kZXYvbnVsbCAiJEdIX0FQSS9yZXBvcy8kcmVwby9jb21taXRzP3NoYT0kYnJhbmNoJnBlcl9wYWdlPTEiIFwKICAgICAgICAgIHwgdHIgLWQgJ1xyJyB8IHNlZCAtbiAncy8uKnBhZ2U9XChbMC05XSpcKT47IHJlbD0ibGFzdCIuKi9cMS9wJykKICBbIC1uICIkdG90YWwiIF0gfHwgcmV0dXJuIDEKICB0YXJnZXQ9JCgoIHZlciAtIGJhc2UgKSkKICBbICIkdGFyZ2V0IiAtZ2UgMSBdIHx8IHJldHVybiAxCiAgcGFnZT0kKCggdG90YWwgLSB0YXJnZXQgKyAxICkpCiAgWyAiJHBhZ2UiIC1nZSAxIF0gfHwgcGFnZT0xCiAgc2hhPSQoZ2hfY3VybCAiJEdIX0FQSS9yZXBvcy8kcmVwby9jb21taXRzP3NoYT0kYnJhbmNoJnBlcl9wYWdlPTEmcGFnZT0kcGFnZSIgXAogICAgICAgIHwgZ3JlcCAtbTEgLW8gJyJzaGEiOiJbMC05YS1mXVx7NDBcfSInIHwgaGVhZCAtbjEgfCBzZWQgJ3MvLioic2hhIjoiLy87IHMvIi8vJykKICBbIC1uICIkc2hhIiBdIHx8IHJldHVybiAxCiAgZWNobyAiJHNoYSIKfQoKIyDku44gQ05CIOeahCBhcGtzIOebruW9lemHjOivu+WHuiBTdWtpU1UgTm92YSDnrqHnkIblmajniYjmnKzlj7fvvIhOb3ZhIOeahCBBUEsg5Y+q5Zyo6L+Z6YeM5Y+R5biD77yJCm5vdmFfYXBrX3ZlcnNpb24oKSB7CiAgY3VybCAtc0wgLS1yZXRyeSAzIC0tY29ubmVjdC10aW1lb3V0IDIwICJodHRwczovL2NuYi5jb29sL3N1a2lzdS1ub3ZhL1JlbGVhc2UvLS90cmVlL21hbmFnZXItY2kvYXBrcyIgXAogICAgfCBncmVwIC1vRSAnU3VraVNVX05vdmFbXiInIiciJzw+XFxdKlwuYXBrJyBcCiAgICB8IGdyZXAgLW9FICdfWzAtOV17NSw2fS1hcm02NCcgfCBncmVwIC1vRSAnWzAtOV17NSw2fScgfCBzb3J0IC1uIHwgdGFpbCAtbiAxCn0KCiMgTm92YSDmj5DkuqTmlbDvvIhHaXRlYSDnmoQgWC1Ub3RhbC1Db3VudO+8iQpub3ZhX3RvdGFsKCkgewogIGN1cmwgLXMgLUQgLSAtbyAvZGV2L251bGwgLS1yZXRyeSAzIC0tY29ubmVjdC10aW1lb3V0IDIwICIkTk9WQV9BUEkvY29tbWl0cz9zaGE9JDEmbGltaXQ9MSIgXAogICAgfCB0ciAtZCAnXHInIHwgc2VkIC1uICdzL15bWHhdLVtUdF1vdGFsLVtDY11vdW50OltbOnNwYWNlOl1dKlwoWzAtOV0qXCkuKi9cMS9wJwp9CgojIE5vdmEg54mI5pys5Y+3IOKGkiDmj5DkuqQgc2hh77yI5Z+65pWwIDMwOTk2ID0gMzAwMDAgKyA5OTbvvIkKbm92YV9jb21taXRfYnlfdmVyc2lvbigpIHsKICBsb2NhbCBicmFuY2g9IiQxIiB2ZXI9IiQyIiB0b3RhbCB0YXJnZXQgcGFnZSBzaGEKICB0b3RhbD0kKG5vdmFfdG90YWwgIiRicmFuY2giKQogIFsgLW4gIiR0b3RhbCIgXSB8fCByZXR1cm4gMQogIHRhcmdldD0kKCggdmVyIC0gMzA5OTYgKSkKICBbICIkdGFyZ2V0IiAtZ2UgMSBdIHx8IHJldHVybiAxCiAgcGFnZT0kKCggdG90YWwgLSB0YXJnZXQgKyAxICkpCiAgWyAiJHBhZ2UiIC1nZSAxIF0gfHwgcGFnZT0xCiAgc2hhPSQoY3VybCAtcyAtLXJldHJ5IDMgLS1jb25uZWN0LXRpbWVvdXQgMjAgIiROT1ZBX0FQSS9jb21taXRzP3NoYT0kYnJhbmNoJmxpbWl0PTEmcGFnZT0kcGFnZSIgXAogICAgICAgIHwgZ3JlcCAtbTEgLW8gJyJzaGEiOiJbMC05YS1mXVx7NDBcfSInIHwgaGVhZCAtbjEgfCBzZWQgJ3MvLioic2hhIjoiLy87IHMvIi8vJykKICBbIC1uICIkc2hhIiBdIHx8IHJldHVybiAxCiAgZWNobyAiJHNoYSIKfQo=' | base64 -d > /tmp/ksu_helper.sh
+          bash -n /tmp/ksu_helper.sh || { echo "::error title=ksu-helper::公共函数脚本语法错误"; exit 1; }
+          echo "---- 公共函数清单 ----"
+          grep -nE '^[A-Za-z_][A-Za-z0-9_]*\(\)' /tmp/ksu_helper.sh || true
           KSU_TARGET="$(echo '${{ github.event.inputs.ksu_ref }}' | tr -d '[:space:]')"
           KSU_TARGET="${KSU_TARGET#v}"
           case "$KSU_TARGET" in
             *[!0-9]*) echo "::warning title=ksu-ref::ksu_ref 只接受纯数字版本号，已忽略: $KSU_TARGET"; KSU_TARGET="" ;;
           esac
           echo "手动指定的目标版本号: ${KSU_TARGET:-（空，自动对齐官方管理器）}"
-          
-          # 带 token 的 GitHub API（避免 Runner 匿名限流 403 导致静默失败）
-          gh_curl() {
-            if [ -n "${GH_TOKEN:-}" ]; then
-              curl -sL --retry 3 --retry-delay 2 --connect-timeout 20 \
-                -H "Authorization: Bearer ${GH_TOKEN}" \
-                -H "Accept: application/vnd.github+json" "$@"
-            else
-              curl -sL --retry 3 --retry-delay 2 --connect-timeout 20 \
-                -H "Accept: application/vnd.github+json" "$@"
-            fi
-          }
-          
-          fetch_setup() {
-            local url="$1" out="$2" i
-            for i in 1 2 3 4 5; do
-              if curl -fL --retry 3 --retry-delay 3 --connect-timeout 20 -o "$out" "$url" \
-                 && head -n 5 "$out" | grep -qE '^#!|^[[:space:]]*set '; then
-                return 0
-              fi
-              echo "setup.sh 下载失败（第 $i 轮）: $url" >&2
-              sleep 5
-            done
-            return 1
-          }
-          
-          # 把 Kbuild 里算出来的版本号直接钉成指定值
-          # 四个分支的 Kbuild 写法各不相同，这里一次全兼容：
-          #   tiann / KernelSU-Next : $(eval KSU_VERSION=$(shell expr 30000 + $(KSU_GIT_VERSION)))
-          #   BakaSU                : KSU_VERSION := $(shell expr 30000 + $(KSU_LOCAL_VERSION) + 700)
-          #   SukiSU Nova           : KSU_VERSION     := $(if $(LOCAL_COUNT),$(shell expr ...),$(VERSION_BASE))
-          # 只要把「KSU_VERSION 的定义行」换掉，下面无论 ccflags-y 还是 CFLAGS_init.o 都会跟着变
-          force_kbuild_version() {
-            local kb="$1" ver="$2"
-            if [ ! -f "$kb" ]; then echo "（Kbuild 不存在，跳过强制版本: $kb）"; return 0; fi
-            # 1) tiann / KernelSU-Next 的 eval 写法
-            sed -i "s|^\$(eval KSU_VERSION=.*|\$(eval KSU_VERSION=${ver})|" "$kb"
-            # 2) BakaSU / Nova 的 := 写法（不会误伤 KSU_VERSION_FULL / KSU_VERSION_TAG）
-            sed -i "s|^\\(KSU_VERSION[[:space:]]*:=\\).*|\\1 ${ver}|" "$kb"
-            # 3) KernelSU-Next 去掉 .git 后走的是 FALLBACK 分支
-            sed -i "s|^\\(KSU_VERSION_FALLBACK[[:space:]]*:=\\).*|\\1 ${ver}|" "$kb"
-            # 4) tiann 在无 git 时用的 16 兜底
-            sed -i "s|^\\(ccflags-y += -DKSU_VERSION=\\)16$|\\1${ver}|" "$kb"
-            echo "---- 内核内 KSU_VERSION 已强制为 ${ver}（$kb）----"
-            grep -nE 'KSU_VERSION[[:space:]]*:=|\$\(eval KSU_VERSION=|KSU_VERSION_FALLBACK[[:space:]]*:=|DKSU_VERSION=' "$kb" | head -n 10 || true
-          }
-          
-          # 从 GitHub latest release 的 APK 文件名里读出 5~6 位版本号
-          gh_apk_version() {
-            gh_curl "$GH_API/repos/$1/releases/latest" \
-              | tr '{},' '\n\n\n' \
-              | grep -oE '[A-Za-z0-9_.+-]+\.apk' \
-              | grep -oE '[0-9]{5,6}' | sort -n | tail -n 1
-          }
-          
-          # 版本号 → tag（离线：本地完整克隆里所有 tag 的提交数反算，不需要任何 API）
-          tag_by_version_local() {
-            local dir="$1" target="$2" base="$3" t c
-            for t in $(git -C "$dir" tag -l 'v*' --sort=-v:refname 2>/dev/null | head -n 100); do
-              c=$(git -C "$dir" rev-list --count "$t" 2>/dev/null)
-              [ -n "$c" ] || continue
-              if [ $((base + c)) -eq "$target" ]; then echo "$t"; return 0; fi
-            done
-            return 1
-          }
-          
-          # 版本号 → tag（联网兜底：release 里找 APK 名带 _版本号- 的那个 tag）
-          tag_by_version_api() {
-            gh_curl "$GH_API/repos/$1/releases?per_page=100" \
-              | tr '{},' '\n\n\n' \
-              | sed -n 's/.*"tag_name":"\([^"]*\)".*/TAG \1/p; s/.*"name":"\([^"]*\.apk\)".*/APK \1/p' \
-              | awk -v v="$2" '
-                  $1=="TAG" { tag=$2 }
-                  $1=="APK" { if (index($2, "_" v "-") > 0) { print tag; exit } }'
-          }
-          
-          # 版本号 → 提交 sha（联网兜底：按「基数 + 提交数」反查第几个提交）
-          commit_by_version_api() {
-            local repo="$1" branch="$2" ver="$3" base="$4" total target page sha
-            total=$(gh_curl -D - -o /dev/null "$GH_API/repos/$repo/commits?sha=$branch&per_page=1" \
-                    | tr -d '\r' | sed -n 's/.*page=\([0-9]*\)>; rel="last".*/\1/p')
-            [ -n "$total" ] || return 1
-            target=$(( ver - base ))
-            [ "$target" -ge 1 ] || return 1
-            page=$(( total - target + 1 ))
-            [ "$page" -ge 1 ] || page=1
-            sha=$(gh_curl "$GH_API/repos/$repo/commits?sha=$branch&per_page=1&page=$page" \
-                  | grep -m1 -o '"sha":"[0-9a-f]\{40\}"' | head -n1 | sed 's/.*"sha":"//; s/"//')
-            [ -n "$sha" ] || return 1
-            echo "$sha"
-          }
-          
-          # 从 CNB 的 apks 目录里读出 SukiSU Nova 管理器版本号（Nova 的 APK 只在这里发布）
-          nova_apk_version() {
-            curl -sL --retry 3 --connect-timeout 20 "https://cnb.cool/sukisu-nova/Release/-/tree/manager-ci/apks" \
-              | grep -oE 'SukiSU_Nova[^"'"'"'<>\\]*\.apk' \
-              | grep -oE '_[0-9]{5,6}-arm64' | grep -oE '[0-9]{5,6}' | sort -n | tail -n 1
-          }
-          
-          # Nova 提交数（Gitea 的 X-Total-Count）
-          nova_total() {
-            curl -s -D - -o /dev/null --retry 3 --connect-timeout 20 "$NOVA_API/commits?sha=$1&limit=1" \
-              | tr -d '\r' | sed -n 's/^[Xx]-[Tt]otal-[Cc]ount:[[:space:]]*\([0-9]*\).*/\1/p'
-          }
-          
-          # Nova 版本号 → 提交 sha（基数 30996 = 30000 + 996）
-          nova_commit_by_version() {
-            local branch="$1" ver="$2" total target page sha
-            total=$(nova_total "$branch")
-            [ -n "$total" ] || return 1
-            target=$(( ver - 30996 ))
-            [ "$target" -ge 1 ] || return 1
-            page=$(( total - target + 1 ))
-            [ "$page" -ge 1 ] || page=1
-            sha=$(curl -s --retry 3 --connect-timeout 20 "$NOVA_API/commits?sha=$branch&limit=1&page=$page" \
-                  | grep -m1 -o '"sha":"[0-9a-f]\{40\}"' | head -n1 | sed 's/.*"sha":"//; s/"//')
-            [ -n "$sha" ] || return 1
-            echo "$sha"
-          }
-          
+          echo "KSU_TARGET=$KSU_TARGET" >> $GITHUB_ENV
+
+      - name: 添加KernelSU（BakaSU / SukiSU Ultra / SukiSU Nova）
+        if: inputs.ksu_type == 'bakasu' || inputs.ksu_type == 'sukisu' || inputs.ksu_type == 'sukisunova'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          source /tmp/ksu_helper.sh
+          cd kernel_workspace
           if [[ ${{ github.event.inputs.ksu_type }} == "sukisu" || ${{ github.event.inputs.ksu_type }} == "bakasu" ]]; then
             echo "正在配置BakaSU（由于SukiSU长期未维护无法正常编译，且BakaSU兼容sukisu管理器，故SukiSU源码仓库已重定向为bakasu）..."
             fetch_setup "https://raw.githubusercontent.com/Baka-SU/BakaSU/refs/heads/main/kernel/setup.sh" /tmp/ksu_setup.sh || { echo "::error title=ksu-setup::BakaSU setup.sh 下载失败"; exit 1; }
@@ -493,7 +388,7 @@ jobs:
             echo "KSU 版本号: $KSU_VERSION"
             echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
             echo "ksuver=$KSU_VERSION" >> $GITHUB_OUTPUT
-          elif [[ ${{ github.event.inputs.ksu_type }} == "sukisunova" ]]; then
+          else
             echo "正在配置 SukiSU Nova（原 GitHub 上的 SukiSU 已停止维护，现迁移至新平台）..."
             NOVA_URL="${{ env.NOVA_REPO_HOST }}/${{ env.NOVA_REPO_OWNER }}/${{ env.NOVA_REPO_NAME }}.git"
             NOVA_ARCHIVE="${{ env.NOVA_REPO_HOST }}/${{ env.NOVA_REPO_OWNER }}/${{ env.NOVA_REPO_NAME }}/archive"
@@ -604,7 +499,16 @@ jobs:
             echo "KSU_BUILD_REF=桂烁" >> $GITHUB_ENV
             echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
             echo "ksuver=$KSU_VERSION" >> $GITHUB_OUTPUT
-          elif [[ ${{ github.event.inputs.ksu_type }} == "ksunext" ]]; then
+          fi
+
+      - name: 添加KernelSU（KernelSU Next）
+        if: inputs.ksu_type == 'ksunext'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          source /tmp/ksu_helper.sh
+          cd kernel_workspace
+          if [[ ${{ github.event.inputs.ksu_type }} == "ksunext" ]]; then
             echo "正在配置KernelSU Next..."
             KSUN_TARGET="$KSU_TARGET"
             if [ -z "$KSUN_TARGET" ]; then
@@ -666,7 +570,15 @@ jobs:
             else
               echo "::warning title=apk-sign::apk_sign.patch 未获取到，跳过 WildKSU 管理器支持补丁"
             fi
-          elif [[ ${{ github.event.inputs.ksu_type }} == "ksu" ]]; then
+          fi
+
+      - name: 添加KernelSU（原版 KernelSU）
+        if: inputs.ksu_type == 'ksu'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          source /tmp/ksu_helper.sh
+          cd kernel_workspace
             echo "正在配置原版 KernelSU (tiann/KernelSU)..."
             KSU_GH_TARGET="$KSU_TARGET"
             if [ -z "$KSU_GH_TARGET" ]; then
@@ -741,10 +653,18 @@ jobs:
             echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
             echo "ksuver=$KSU_VERSION" >> $GITHUB_OUTPUT
             force_kbuild_version "kernel/Kbuild" "$KSU_VERSION"
-          else
-            echo "已选择无内置KernelSU模式，跳过KernelSU配置..."
-          fi
 
+      - name: 汇总 KernelSU 版本号
+        id: ksu_version
+        if: always()
+        run: |
+          if [ -n "${KSUVER:-}" ]; then
+            echo "KSU 版本号: $KSUVER"
+            echo "ksuver=$KSUVER" >> $GITHUB_OUTPUT
+          else
+            echo "本次未设置 KSU 版本号（ksu_type=none 时属正常）"
+            echo "ksuver=" >> $GITHUB_OUTPUT
+          fi
       - name: 应用 KernelSU & SUSFS 补丁
         if: inputs.susfs_enable
         run: |
