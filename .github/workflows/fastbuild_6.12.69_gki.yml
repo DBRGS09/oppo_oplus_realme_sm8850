@@ -111,6 +111,7 @@ jobs:
     outputs:
       ksuver: ${{ steps.ksu_version.outputs.ksuver }}
       ak3name: ${{ steps.create_zip.outputs.ak3name }}
+      kpmmode: ${{ steps.ksu_config.outputs.kpmmode }}
     permissions:
       actions: write
       contents: read
@@ -977,6 +978,7 @@ jobs:
           fi
           
       - name: 添加 KSU & 其他配置项
+        id: ksu_config
         run: |
           cd kernel_workspace
           # KPM 两种实现：Nova 用管理器内置的 CONFIG_KPM，其余分支用 KPatch-Next 织入内核镜像
@@ -989,6 +991,7 @@ jobs:
           fi
           echo "KPM 实现方式: $KPM_MODE"
           echo "KPM_MODE=$KPM_MODE" >> $GITHUB_ENV
+          echo "kpmmode=$KPM_MODE" >> $GITHUB_OUTPUT
           echo "CONFIG_KSU=y" >> ./common/arch/arm64/configs/gki_defconfig
           if [[ "${{ github.event.inputs.susfs_enable }}" == "false" ]]; then
             echo "CONFIG_KSU_SUSFS=n" >> ./common/arch/arm64/configs/gki_defconfig
@@ -1628,7 +1631,7 @@ jobs:
           - KSU版本号：${{ needs.build.outputs.ksuver }}（指定版本号则内核内版本号与包名均按指定的走；留空则自动对齐官方管理器最新APK版本）
           - susfs支持：${{ github.event.inputs.susfs_enable }}
           - KPM支持 ：${{ github.event.inputs.kpm_enable }}
-          - KPM实现方式：${{ github.event.inputs.kpm_enable == 'true' && (github.event.inputs.ksu_type == 'sukisunova' && 'Nova 内置 CONFIG_KPM（管理器自带 KPM 页，无需刷模块）' || 'KPatch-Next 织入内核镜像（附 kpn.zip 模块）') || '未启用' }}
+          - KPM实现方式：${{ needs.build.outputs.kpmmode }}
           - LZ4支持：${{ github.event.inputs.lz4_enable }}
           - LZ4KD支持：${{ github.event.inputs.lz4kd_enable }}
           - 网络功能增强：${{ github.event.inputs.better_net }}
