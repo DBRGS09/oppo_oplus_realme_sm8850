@@ -37,7 +37,7 @@ on:
         type: boolean
         default: 'true'
       kpm_enable:
-        description: '是否开启kpm(使用KpatchNext独立实现kpm(支持任意KSU/面具环境); 不需要可保持默认关闭)'
+        description: '是否开启kpm(SukiSU Nova: 使用管理器内置的 CONFIG_KPM, 自带KPM页无需刷模块; 其他分支: 用 KpatchNext 织入内核镜像并附带 kpn.zip; 不需要可保持默认关闭)'
         required: true
         type: boolean
         default: 'false'
@@ -679,6 +679,10 @@ jobs:
             cd ./KernelSU
             KSU_TAG=""
             if [ -n "$KSU_GH_TARGET" ]; then
+              KSU_TAG=$(tag_by_version_local "." "$KSU_GH_TARGET" 30000 || true)
+              [ -n "$KSU_TAG" ] || KSU_TAG=$(tag_by_version_api "tiann/KernelSU" "$KSU_GH_TARGET" || true)
+            fi
+            if [ -n "$KSU_GH_TARGET" ]; then
               if [[ "${{ github.event.inputs.susfs_enable }}" == "true" ]]; then
                 # 关键：susfs4oki 的 10_enable_susfs_for_ksu.patch 是针对 main 的文件结构写的
                 # （它的上下文里有 #include "preinit/preinit.h"），切到旧 tag 会让补丁只打上一半，
@@ -687,9 +691,22 @@ jobs:
                 echo "检测到开启 SUSFS：KernelSU 源码保持 main 最新（旧 tag 会让 SUSFS 附加补丁只打上一半）"
                 echo "版本号稍后由 force_kbuild_version 直接写进 Kbuild，管理器看到的仍然是 $KSU_GH_TARGET"
                 echo "::notice title=ksu-ref::SUSFS 开启，源码保持 main，仅把内核内版本号对齐为 $KSU_GH_TARGET"
+                # 版本号对了还不够：管理器首页那串「32680-5」「32680-6」的尾巴是 UAPI 版本号。
+                # main 的 UAPI 是 6，而 v3.3.1（32680）官方管理器是 5，会让管理器提示「需要更新管理器」。
+                # 这里把内核 UAPI 对齐成目标版本的 UAPI，两边就都是 -5。
+                if [ -n "$KSU_TAG" ]; then
+                  TARGET_UAPI=$(git show "$KSU_TAG:uapi/supercall.h" 2>/dev/null | sed -n 's/.*KERNEL_SU_UAPI_VERSION = \([0-9][0-9]*\).*/\1/p' | head -n 1)
+                  CUR_UAPI=$(sed -n 's/.*KERNEL_SU_UAPI_VERSION = \([0-9][0-9]*\).*/\1/p' uapi/supercall.h 2>/dev/null | head -n 1)
+                  echo "管理器 tag $KSU_TAG 的 UAPI: ${TARGET_UAPI:-未取到} / 当前 main 的 UAPI: ${CUR_UAPI:-未取到}"
+                  if [ -n "$TARGET_UAPI" ] && [ "$TARGET_UAPI" != "$CUR_UAPI" ]; then
+                    sed -i "s/\(KERNEL_SU_UAPI_VERSION = \)[0-9][0-9]*/\1$TARGET_UAPI/" uapi/supercall.h
+                    echo "已把内核 UAPI 对齐为 $TARGET_UAPI：$(grep -m1 'KERNEL_SU_UAPI_VERSION = ' uapi/supercall.h)"
+                    echo "::notice title=ksu-uapi::内核 UAPI 已对齐为 $TARGET_UAPI，管理器不会再提示需要更新"
+                  else
+                    echo "UAPI 无需调整（目标 $TARGET_UAPI / 当前 $CUR_UAPI）"
+                  fi
+                fi
               else
-                KSU_TAG=$(tag_by_version_local "." "$KSU_GH_TARGET" 30000 || true)
-                [ -n "$KSU_TAG" ] || KSU_TAG=$(tag_by_version_api "tiann/KernelSU" "$KSU_GH_TARGET" || true)
                 KSU_HIT=0
                 if [ -n "$KSU_TAG" ]; then
                   if git checkout "$KSU_TAG"; then
@@ -962,12 +979,31 @@ jobs:
       - name: 添加 KSU & 其他配置项
         run: |
           cd kernel_workspace
+          # KPM 两种实现：Nova 用管理器内置的 CONFIG_KPM，其余分支用 KPatch-Next 织入内核镜像
+          if [[ "${{ github.event.inputs.kpm_enable }}" != "true" ]]; then
+            KPM_MODE="未启用"
+          elif [[ "${{ github.event.inputs.ksu_type }}" == "sukisunova" ]]; then
+            KPM_MODE="Nova内置CONFIG_KPM"
+          else
+            KPM_MODE="KPatch-Next织入"
+          fi
+          echo "KPM 实现方式: $KPM_MODE"
+          echo "KPM_MODE=$KPM_MODE" >> $GITHUB_ENV
           echo "CONFIG_KSU=y" >> ./common/arch/arm64/configs/gki_defconfig
           if [[ "${{ github.event.inputs.susfs_enable }}" == "false" ]]; then
             echo "CONFIG_KSU_SUSFS=n" >> ./common/arch/arm64/configs/gki_defconfig
           fi
           if [[ ${{ github.event.inputs.ksu_type }} == "sukisunova" ]]; then
-            echo "# CONFIG_KPM is not set" >> ./common/arch/arm64/configs/gki_defconfig
+            if [[ "${{ github.event.inputs.kpm_enable }}" == "true" ]]; then
+              echo "SukiSU Nova 勾选了 KPM：改用管理器内置的 CONFIG_KPM（不走 KPatch-Next 织入）"
+              echo "CONFIG_KPM=y" >> ./common/arch/arm64/configs/gki_defconfig
+              echo "CONFIG_KALLSYMS=y" >> ./common/arch/arm64/configs/gki_defconfig
+              echo "CONFIG_KALLSYMS_ALL=y" >> ./common/arch/arm64/configs/gki_defconfig
+              echo "::notice title=kpm-mode::Nova 内置 CONFIG_KPM 已启用（管理器自带 KPM 页）"
+            else
+              echo "# CONFIG_KPM is not set" >> ./common/arch/arm64/configs/gki_defconfig
+              echo "::notice title=kpm-mode::未启用 KPM"
+            fi
           fi
           echo "CONFIG_TMPFS_XATTR=y" >> ./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_TMPFS_POSIX_ACL=y" >> ./common/arch/arm64/configs/gki_defconfig
@@ -1402,7 +1438,7 @@ jobs:
           key: ${{ env.CCACHE_REAL_KEY }}-${{ runner.os }}-${{ github.ref_name }}
          
       - name: 应用KPM并修补内核
-        if: inputs.kpm_enable
+        if: inputs.kpm_enable && inputs.ksu_type != 'sukisunova'
         run: |
           echo "正在应用KP-N并修补内核..."
           cd kernel_workspace/common/out/arch/arm64/boot
@@ -1469,11 +1505,12 @@ jobs:
               exit 1
             fi
           fi
-          if [[ ${{ github.event.inputs.kpm_enable }} == 'true' ]]; then
+          if [[ ${{ github.event.inputs.kpm_enable }} == 'true' && "${{ github.event.inputs.ksu_type }}" != "sukisunova" ]]; then
             if ! wget -q -O kpn.zip "https://github.com/cctv18/KPatch-Next/releases/latest/download/kpn.zip" || [ ! -s kpn.zip ]; then
               echo "::error title=kpn-zip::kpn.zip 下载失败，本次不出包"
               exit 1
             fi
+            echo "已附带 KPatch-Next 模块（kpn.zip）"
           fi
           if [[ -n "${{ github.event.inputs.kernel_suffix }}" ]]; then
             AK3_NAME=AnyKernel3_${KSU_TYPENAME}_${{ env.KSUVER }}_${{ env.KERNEL_VERSION }}.${{ env.SUB_VERSION }}_${{ github.event.inputs.kernel_suffix }}.zip
@@ -1502,7 +1539,7 @@ jobs:
           echo "KSU Branch: ${KSU_TYPENAME}" >> ./ak3.log
           echo "KSU Ver: ${KSUVER}" >> ./ak3.log
           echo "susfs: ${{ github.event.inputs.susfs_enable }}" >> ./ak3.log
-          echo "KPM: ${{ github.event.inputs.kpm_enable }}" >> ./ak3.log
+          echo "KPM: ${{ github.event.inputs.kpm_enable }} (${KPM_MODE})" >> ./ak3.log
           echo "LZ4: ${{ github.event.inputs.lz4_enable }}" >> ./ak3.log
           echo "LZ4KD: ${{ github.event.inputs.lz4kd_enable }}" >> ./ak3.log
           echo "IPset: ${{ github.event.inputs.better_net }}" >> ./ak3.log
@@ -1591,6 +1628,7 @@ jobs:
           - KSU版本号：${{ needs.build.outputs.ksuver }}（指定版本号则内核内版本号与包名均按指定的走；留空则自动对齐官方管理器最新APK版本）
           - susfs支持：${{ github.event.inputs.susfs_enable }}
           - KPM支持 ：${{ github.event.inputs.kpm_enable }}
+          - KPM实现方式：${{ github.event.inputs.kpm_enable == 'true' && (github.event.inputs.ksu_type == 'sukisunova' && 'Nova 内置 CONFIG_KPM（管理器自带 KPM 页，无需刷模块）' || 'KPatch-Next 织入内核镜像（附 kpn.zip 模块）') || '未启用' }}
           - LZ4支持：${{ github.event.inputs.lz4_enable }}
           - LZ4KD支持：${{ github.event.inputs.lz4kd_enable }}
           - 网络功能增强：${{ github.event.inputs.better_net }}
